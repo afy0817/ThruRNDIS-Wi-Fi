@@ -10,7 +10,7 @@ set -eu
 
 VM_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 OUT=${1:-$VM_DIR/../dist/vm_assets}
-ALPINE_IMAGE=${ALPINE_IMAGE:-alpine:3.24}
+ALPINE_IMAGE=${ALPINE_IMAGE:-alpine:edge}
 VERSION=${THRURNDIS_WIFI_VERSION:-$(date +%Y%m%d.%H%M)}
 
 mkdir -p "$OUT"

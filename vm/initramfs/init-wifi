@@ -11,7 +11,7 @@ PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
 export PATH
 
 # The 802.11 stack and the ciphers mac80211 and wpa_supplicant ask for.
-WIFI_MODULES="cfg80211 mac80211 ccm gcm cmac ctr ghash-generic michael_mic ecdh_generic aes-ce-ccm"
+WIFI_MODULES="cfg80211 mac80211 ccm gcm cmac ctr ghash-ce ecdh_generic aes-ce-ccm"
 
 # Written by build_assets.py from vm/drivers.conf:
 #   load <driver>

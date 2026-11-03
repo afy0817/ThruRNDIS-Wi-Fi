@@ -8,7 +8,7 @@ guest scripts and console markers) and adds the USB Wi-Fi stack: cfg80211,
 mac80211, rtw89 USB drivers with their firmware, wireless-regdb,
 wpa_supplicant and a busybox httpd control API.
 
-Run through vm/build.sh; it expects linux-lts, linux-firmware-rtw89,
+Run through vm/build.sh; it expects linux-stable, linux-firmware-rtw89,
 wireless-regdb and kmod to be installed in the container already.
 """
 
@@ -39,10 +39,10 @@ ROOT_PACKAGES = [
 BASE_MODULE_SEEDS = [
     "virtio_pci", "virtio_mmio", "virtio_console", "virtio_net", "af_packet",
     "xhci_hcd", "xhci_pci", "usbnet", "cdc_ether", "cdc_subset", "rndis_host",
-    "nfnetlink", "nf_tables", "nf_conntrack", "nf_nat", "nft_chain_nat",
+    "nf_tables", "nf_conntrack", "nf_nat", "nft_chain_nat",
     "nft_ct", "nft_nat", "nft_masq",
     "cfg80211", "mac80211",
-    "ccm", "gcm", "cmac", "ctr", "ghash_generic", "michael_mic",
+    "ccm", "gcm", "cmac", "ctr", "ghash_ce",
     "ecdh_generic", "aes_ce_ccm",
 ]
 
@@ -392,11 +392,12 @@ def main() -> int:
     for stale in args.out.iterdir():
         if stale.is_file():
             stale.unlink()
+    # The name predates linux-stable; installed apps point ThruRNDIS at it.
     image = args.out / "Image-lts"
     # ThruRNDIS only accepts a manual asset folder whose ramdisk matches
     # initramfs-thrurndis-* and whose manifest.json has assetVersion 1.
     initramfs = args.out / "initramfs-thrurndis-wifi"
-    extract_linux_image(pathlib.Path("/boot/vmlinuz-lts"), image)
+    extract_linux_image(pathlib.Path("/boot/vmlinuz-stable"), image)
     write_initramfs(root, initramfs)
 
     manifest = dict(assetVersion=1, schemaVersion=1, **release_info,

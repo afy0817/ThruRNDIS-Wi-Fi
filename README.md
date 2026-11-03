@@ -106,7 +106,7 @@ VM 이미지에 기본으로 들어 있는 드라이버입니다(리눅스 커�
 
 ### 다른 동글 쓰기 (드라이버 추가)
 
-VM 의 리눅스 커널(Alpine linux-lts)에는 위 표 말고도 USB Wi-Fi 드라이버가 더 있습니다. 대부분 표에 한 줄을 넣고 다시 빌드하면 됩니다. 빌드에는 Docker Desktop 이 필요합니다([직접 빌드](#직접-빌드)).
+VM 의 리눅스 커널(Alpine linux-stable)에는 위 표 말고도 USB Wi-Fi 드라이버가 더 있습니다. 대부분 표에 한 줄을 넣고 다시 빌드하면 됩니다. 빌드에는 Docker Desktop 이 필요합니다([직접 빌드](#직접-빌드)).
 
 1. 동글의 USB ID(`xxxx:yyyy`)를 확인합니다. 메뉴의 안내 문구나 **시스템 정보 → USB** 에 나옵니다.
 2. 어떤 드라이버가 맡는지 찾습니다.
@@ -166,7 +166,7 @@ ditto -c -k --keepParent dist/ThruRNDIS-Wi-Fi.app dist/ThruRNDIS-Wi-Fi.zip
 ```text
 app/              메뉴 막대 앱 (SwiftUI)
 helper/           라우팅 도우미: launchd 데몬과, ThruRNDIS 연결이 기본 경로가 되지 않게 하는 도구
-vm/               VM 이미지 빌드: Alpine linux-lts, Wi-Fi 드라이버·펌웨어, wpa_supplicant, 제어 API
+vm/               VM 이미지 빌드: Alpine linux-stable, Wi-Fi 드라이버·펌웨어, wpa_supplicant, 제어 API
 vm/drivers.conf   VM 에 넣을 USB Wi-Fi 드라이버 목록
 vm/tools/         find-driver.sh: USB ID 로 드라이버 찾기
 ```
