@@ -1,0 +1,143 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 GodSeon
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# One-shot: loads the USB Wi-Fi stack before the dongle is passed through,
+# sets the regulatory domain, and writes the initial wpa_supplicant config
+# from the kernel command line (thrurndis-wifi.net=<ssid-hex>:<psk-hex>:<sae-hex>:<hidden>).
+
+BB=/usr/bin/busybox
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export PATH
+
+# The 802.11 stack and the ciphers mac80211 and wpa_supplicant ask for.
+WIFI_MODULES="cfg80211 mac80211 ccm gcm cmac ctr ghash-generic michael_mic ecdh_generic aes-ce-ccm"
+
+# Written by build_assets.py from vm/drivers.conf:
+#   load <driver>
+#   newid <driver> <vendor> <product> <reference vendor> <reference product>
+# newid registers a USB ID newer than the kernel's driver tables, with a
+# reference device of the same chip so its driver_info is reused.
+DRIVERS_FILE=/etc/thrurndis-wifi/drivers
+
+log() {
+    echo "thrurndis-wifi-init: $*" >/dev/kmsg 2>/dev/null || true
+}
+
+log_console() {
+    log "$*"
+    if [ -c /dev/console ]; then
+        echo "thrurndis-wifi-init: $*" >/dev/console 2>/dev/null || true
+    else
+        echo "thrurndis-wifi-init: $*" 2>/dev/null || true
+    fi
+}
+
+run_with_timeout() {
+    timeout_seconds=$1
+    shift
+
+    "$@" &
+    child_pid=$!
+    (
+        $BB sleep "$timeout_seconds"
+        kill "$child_pid" 2>/dev/null || true
+        $BB sleep 1
+        kill -9 "$child_pid" 2>/dev/null || true
+    ) &
+    watchdog_pid=$!
+
+    wait "$child_pid"
+    rc=$?
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+
+    case "$rc" in
+        137|143) return 124 ;;
+        *) return "$rc" ;;
+    esac
+}
+
+load_module() {
+    module=$1
+    timeout_seconds=${2:-8}
+
+    run_with_timeout "$timeout_seconds" /sbin/modprobe -q "$module" 2>/tmp/modprobe.err
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log_console "loaded module $module"
+        return 0
+    fi
+
+    error=$($BB cat /tmp/modprobe.err 2>/dev/null || true)
+    log_console "failed to load module $module rc=$rc ${error}"
+    return "$rc"
+}
+
+cmdline_value() {
+    key=$1
+    for opt in $($BB cat /proc/cmdline); do
+        case "$opt" in
+            "$key"=*) printf '%s' "${opt#"$key"=}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+$BB mkdir -p /run/thrurndis-wifi /run/wpa_supplicant
+$BB chmod 700 /run/thrurndis-wifi
+
+country=$(cmdline_value thrurndis-wifi.country || true)
+case "$country" in
+    [A-Z][A-Z]) ;;
+    *) country=KR ;;
+esac
+echo "$country" >/run/thrurndis-wifi/country
+
+log_console "loading USB Wi-Fi modules"
+for module in $WIFI_MODULES $($BB awk '$1 == "load" { print $2 }' "$DRIVERS_FILE" 2>/dev/null); do
+    load_module "$module" 8 || true
+done
+
+$BB awk '$1 == "newid" { print $2, $3, $4, $5, $6 }' "$DRIVERS_FILE" 2>/dev/null |
+while read -r driver vendor product ref_vendor ref_product; do
+    [ -n "$driver" ] || continue
+    new_id=/sys/bus/usb/drivers/$driver/new_id
+    [ -w "$new_id" ] || continue
+    if $BB grep -qi "^v${vendor}p${product}\|usb:v${vendor}p${product}" \
+        "/lib/modules/$($BB uname -r)/modules.alias" 2>/dev/null; then
+        continue
+    fi
+    if echo "$vendor $product ff $ref_vendor $ref_product" >"$new_id" 2>/dev/null; then
+        log_console "added USB ID $vendor:$product to $driver (as $ref_vendor:$ref_product)"
+    else
+        log_console "failed to add USB ID $vendor:$product to $driver"
+    fi
+done
+
+if command -v iw >/dev/null 2>&1; then
+    iw reg set "$country" 2>/dev/null && log_console "regulatory domain $country"
+fi
+
+# thrurndis-wifi-config validates every field again, so a malformed boot value only
+# leaves the network list empty.
+net=$(cmdline_value thrurndis-wifi.net || true)
+if [ -n "$net" ]; then
+    old_ifs=$IFS
+    IFS=:
+    # shellcheck disable=SC2086
+    set -- $net
+    IFS=$old_ifs
+    if /usr/local/sbin/thrurndis-wifi-config write "${1:-}" "${2:-}" "${3:-}" "${4:-0}"; then
+        log_console "initial network loaded from kernel command line"
+    else
+        log_console "ignored malformed thrurndis-wifi.net boot value"
+        /usr/local/sbin/thrurndis-wifi-config clear
+    fi
+else
+    /usr/local/sbin/thrurndis-wifi-config clear
+fi
+
+[ -x /sbin/mdev ] && /sbin/mdev -s 2>/dev/null || true
+log_console "Wi-Fi preparation finished"
+exit 0

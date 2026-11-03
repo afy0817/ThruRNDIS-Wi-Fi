@@ -1,0 +1,178 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640" role="img" aria-labelledby="title desc">
+  <title id="title">ThruRNDIS-Wi-Fi 구조</title>
+  <desc id="desc">맥의 지정 대역 트래픽은 ThruRNDIS 연결(bond0)을 지나 Linux VM 과 USB Wi-Fi 동글을 거쳐 대상 Wi-Fi 망으로 가고, 나머지 트래픽은 맥 내장 Wi-Fi 로 인터넷에 갑니다.</desc>
+  <style>
+    svg { font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", "Segoe UI", sans-serif; }
+    .bg { fill: #ffffff; stroke: #d0d7de; }
+    .region { fill: #f6f8fa; stroke: #d0d7de; }
+    .label { fill: #59636e; font-size: 13px; font-weight: 600; }
+    .title { fill: #1f2328; font-size: 14px; font-weight: 700; }
+    .sub { fill: #59636e; font-size: 11.5px; }
+    .edge { fill: #59636e; font-size: 11px; }
+    .ours { fill: #dafbe1; stroke: #1a7f37; stroke-width: 1.5; }
+    .thr { fill: #fbefff; stroke: #8250df; stroke-width: 1.5; }
+    .hw { fill: #fff8c5; stroke: #9a6700; stroke-width: 1.5; }
+    .plain { fill: #ffffff; stroke: #afb8c1; stroke-width: 1.5; }
+    .dongle { stroke: #0969da; stroke-width: 3; fill: none; }
+    .other { stroke: #8c959f; stroke-width: 3; fill: none; }
+    .control { stroke: #59636e; stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
+    .usb { stroke: #9a6700; stroke-width: 2; stroke-dasharray: 6 4; fill: none; }
+    .head-dongle { fill: #0969da; }
+    .head-other { fill: #8c959f; }
+    .head-control { fill: #59636e; }
+    .head-usb { fill: #9a6700; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; stroke: #30363d; }
+      .region { fill: #161b22; stroke: #30363d; }
+      .label, .sub, .edge { fill: #9198a1; }
+      .title { fill: #e6edf3; }
+      .ours { fill: #0f2e1a; stroke: #3fb950; }
+      .thr { fill: #2a1d3f; stroke: #a371f7; }
+      .hw { fill: #2e2408; stroke: #d29922; }
+      .plain { fill: #0d1117; stroke: #484f58; }
+      .dongle { stroke: #4493f8; }
+      .other { stroke: #6e7681; }
+      .control { stroke: #9198a1; }
+      .usb { stroke: #d29922; }
+      .head-dongle { fill: #4493f8; }
+      .head-other { fill: #6e7681; }
+      .head-control { fill: #9198a1; }
+      .head-usb { fill: #d29922; }
+    }
+  </style>
+  <defs>
+    <marker id="a-dongle" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path class="head-dongle" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="a-other" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path class="head-other" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="a-control" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head-control" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="a-usb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="head-usb" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+
+  <rect class="bg" x="0.5" y="0.5" width="1199" height="639" rx="16"/>
+
+  <!-- Legend -->
+  <g transform="translate(24 22)">
+    <rect class="ours" x="0" y="0" width="14" height="14" rx="3"/>
+    <text class="sub" x="20" y="12">ThruRNDIS-Wi-Fi (이 프로젝트)</text>
+    <rect class="thr" x="210" y="0" width="14" height="14" rx="3"/>
+    <text class="sub" x="230" y="12">ThruRNDIS (Afcoo)</text>
+    <rect class="hw" x="360" y="0" width="14" height="14" rx="3"/>
+    <text class="sub" x="380" y="12">하드웨어</text>
+    <rect class="plain" x="450" y="0" width="14" height="14" rx="3"/>
+    <text class="sub" x="470" y="12">macOS · 네트워크</text>
+    <line class="dongle" x1="600" y1="7" x2="632" y2="7"/>
+    <text class="sub" x="640" y="12">지정 대역 (동글)</text>
+    <line class="other" x1="760" y1="7" x2="792" y2="7"/>
+    <text class="sub" x="800" y="12">나머지 (내장 Wi-Fi)</text>
+    <line class="control" x1="935" y1="7" x2="967" y2="7"/>
+    <text class="sub" x="975" y="12">제어 · 설정</text>
+  </g>
+
+  <!-- Regions -->
+  <rect class="region" x="196" y="64" width="408" height="556" rx="14"/>
+  <text class="label" x="212" y="88">맥 (macOS)</text>
+  <rect class="region" x="636" y="64" width="270" height="556" rx="14"/>
+  <text class="label" x="652" y="88">Linux VM · ThruRNDIS 가 실행</text>
+  <rect class="region" x="938" y="64" width="242" height="556" rx="14"/>
+  <text class="label" x="954" y="88">대상 Wi-Fi 망 (예: 장비망)</text>
+
+  <!-- Internet -->
+  <rect class="plain" x="20" y="290" width="130" height="64" rx="10"/>
+  <text class="title" x="85" y="317" text-anchor="middle">인터넷</text>
+  <text class="sub" x="85" y="337" text-anchor="middle">사무실 Wi-Fi</text>
+
+  <!-- Mac: control row -->
+  <rect class="ours" x="216" y="104" width="160" height="64" rx="10"/>
+  <text class="title" x="296" y="128" text-anchor="middle">라우팅 도우미</text>
+  <text class="sub" x="296" y="146" text-anchor="middle">지정 대역 → bond0</text>
+  <text class="sub" x="296" y="161" text-anchor="middle">bond0 기본 경로 금지</text>
+
+  <rect class="ours" x="424" y="104" width="160" height="64" rx="10"/>
+  <text class="title" x="504" y="128" text-anchor="middle">메뉴 막대 앱</text>
+  <text class="sub" x="504" y="146" text-anchor="middle">검색·연결 · 고정 IP</text>
+  <text class="sub" x="504" y="161" text-anchor="middle">VM 이미지 적용</text>
+
+  <!-- Mac: traffic source -->
+  <rect class="plain" x="216" y="204" width="368" height="46" rx="10"/>
+  <text class="title" x="400" y="232" text-anchor="middle">맥의 앱 (브라우저 · SSH …)</text>
+
+  <!-- Mac: interfaces -->
+  <rect class="plain" x="216" y="290" width="160" height="64" rx="10"/>
+  <text class="title" x="296" y="317" text-anchor="middle">내장 Wi-Fi (en0)</text>
+  <text class="sub" x="296" y="337" text-anchor="middle">기본 경로 · DNS</text>
+
+  <rect class="thr" x="424" y="290" width="160" height="64" rx="10"/>
+  <text class="title" x="504" y="317" text-anchor="middle">bond0</text>
+  <text class="sub" x="504" y="337" text-anchor="middle">192.168.100.2</text>
+
+  <!-- Mac: ThruRNDIS -->
+  <rect class="thr" x="216" y="404" width="368" height="64" rx="10"/>
+  <text class="title" x="400" y="430" text-anchor="middle">ThruRNDIS</text>
+  <text class="sub" x="400" y="450" text-anchor="middle">VM 실행 · USB 전달 · 맥 쪽 연결(bond0) 생성</text>
+
+  <!-- Mac: dongle -->
+  <rect class="hw" x="216" y="524" width="368" height="64" rx="10"/>
+  <text class="title" x="400" y="550" text-anchor="middle">USB Wi-Fi 동글</text>
+  <text class="sub" x="400" y="570" text-anchor="middle">맥 USB 포트 · RTL8851BU / RTL8852BU</text>
+
+  <!-- VM -->
+  <rect class="ours" x="656" y="104" width="230" height="64" rx="10"/>
+  <text class="title" x="771" y="128" text-anchor="middle">제어 API :8080</text>
+  <text class="sub" x="771" y="148" text-anchor="middle">상태 · 검색 · 연결</text>
+
+  <rect class="ours" x="656" y="290" width="230" height="64" rx="10"/>
+  <text class="title" x="771" y="317" text-anchor="middle">eth0</text>
+  <text class="sub" x="771" y="337" text-anchor="middle">192.168.100.1</text>
+
+  <rect class="ours" x="656" y="404" width="230" height="64" rx="10"/>
+  <text class="title" x="771" y="430" text-anchor="middle">정책 라우팅 + NAT</text>
+  <text class="sub" x="771" y="450" text-anchor="middle">nftables · 추가 경로</text>
+
+  <rect class="ours" x="656" y="524" width="230" height="64" rx="10"/>
+  <text class="title" x="771" y="548" text-anchor="middle">wlan0</text>
+  <text class="sub" x="771" y="566" text-anchor="middle">wpa_supplicant + rtw89</text>
+  <text class="sub" x="771" y="581" text-anchor="middle">고정 IP / DHCP</text>
+
+  <!-- Target network -->
+  <rect class="plain" x="956" y="104" width="206" height="64" rx="10"/>
+  <text class="title" x="1059" y="128" text-anchor="middle">10.10.0.0/24</text>
+  <text class="sub" x="1059" y="148" text-anchor="middle">라우터 너머의 장비 대역</text>
+
+  <rect class="plain" x="956" y="290" width="206" height="64" rx="10"/>
+  <text class="title" x="1059" y="317" text-anchor="middle">192.168.50.0/24</text>
+  <text class="sub" x="1059" y="337" text-anchor="middle">장비 · 웹 화면</text>
+
+  <rect class="plain" x="956" y="524" width="206" height="64" rx="10"/>
+  <text class="title" x="1059" y="550" text-anchor="middle">Wi-Fi AP</text>
+  <text class="sub" x="1059" y="570" text-anchor="middle">대상 SSID</text>
+
+  <!-- Traffic: everything else -->
+  <line class="other" x1="296" y1="250" x2="296" y2="286" marker-end="url(#a-other)"/>
+  <line class="other" x1="216" y1="322" x2="154" y2="322" marker-end="url(#a-other)"/>
+  <text class="edge" x="185" y="314" text-anchor="middle">나머지</text>
+
+  <!-- Traffic: selected ranges through the dongle -->
+  <line class="dongle" x1="504" y1="250" x2="504" y2="286" marker-end="url(#a-dongle)"/>
+  <line class="dongle" x1="584" y1="322" x2="652" y2="322" marker-end="url(#a-dongle)"/>
+  <text class="edge" x="620" y="314" text-anchor="middle">지정 대역</text>
+  <line class="dongle" x1="771" y1="354" x2="771" y2="400" marker-end="url(#a-dongle)"/>
+  <line class="dongle" x1="771" y1="468" x2="771" y2="520" marker-end="url(#a-dongle)"/>
+  <line class="dongle" x1="886" y1="556" x2="952" y2="556" marker-end="url(#a-dongle)"/>
+  <text class="edge" x="920" y="548" text-anchor="middle">Wi-Fi</text>
+  <line class="dongle" x1="1059" y1="524" x2="1059" y2="358" marker-end="url(#a-dongle)"/>
+  <line class="dongle" x1="1059" y1="290" x2="1059" y2="172" marker-end="url(#a-dongle)"/>
+  <text class="edge" x="1068" y="234">추가 경로</text>
+
+  <!-- USB passthrough -->
+  <line class="usb" x1="584" y1="556" x2="652" y2="556" marker-end="url(#a-usb)"/>
+  <text class="edge" x="618" y="548" text-anchor="middle">USB 전달</text>
+
+  <!-- Control -->
+  <line class="control" x1="424" y1="136" x2="380" y2="136" marker-end="url(#a-control)"/>
+  <text class="edge" x="400" y="128" text-anchor="middle">설정</text>
+  <line class="control" x1="584" y1="136" x2="652" y2="136" marker-end="url(#a-control)"/>
+  <text class="edge" x="618" y="128" text-anchor="middle">제어</text>
+  <line class="control" x1="504" y1="404" x2="504" y2="358" marker-end="url(#a-control)"/>
+  <text class="edge" x="512" y="385">생성</text>
+  <line class="control" x1="584" y1="436" x2="632" y2="436" marker-end="url(#a-control)"/>
+  <text class="edge" x="608" y="428" text-anchor="middle">VM 실행</text>
+</svg>

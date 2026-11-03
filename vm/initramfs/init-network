@@ -1,0 +1,181 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Afcoo
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+BB=/usr/bin/busybox
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export PATH
+
+VZNAT_IFACE=${THRURNDIS_VZNAT_IFACE:-eth0}
+VZNAT_WAIT_SECONDS=${THRURNDIS_VZNAT_WAIT_SECONDS:-8}
+VZNAT_DHCP_ATTEMPTS=${THRURNDIS_VZNAT_DHCP_ATTEMPTS:-5}
+VZNAT_DHCP_TIMEOUT_SECONDS=${THRURNDIS_VZNAT_DHCP_TIMEOUT_SECONDS:-2}
+VZNAT_DHCP_TOTAL_TIMEOUT_SECONDS=${THRURNDIS_VZNAT_DHCP_TOTAL_TIMEOUT_SECONDS:-16}
+HOST_LINK_GUEST_CIDR=192.168.100.1/24
+
+log() {
+    echo "thrurndis-net: $*" >/dev/kmsg 2>/dev/null || true
+}
+
+log_console() {
+    log "$*"
+    if [ -c /dev/console ]; then
+        echo "thrurndis-net: $*" >/dev/console 2>/dev/null || true
+    else
+        echo "thrurndis-net: $*" 2>/dev/null || true
+    fi
+}
+
+run_with_timeout() {
+    timeout_seconds=$1
+    shift
+
+    "$@" &
+    child_pid=$!
+    (
+        $BB sleep "$timeout_seconds"
+        kill "$child_pid" 2>/dev/null || true
+        $BB sleep 1
+        kill -9 "$child_pid" 2>/dev/null || true
+    ) &
+    watchdog_pid=$!
+
+    wait "$child_pid"
+    rc=$?
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+
+    case "$rc" in
+        137|143) return 124 ;;
+        *) return "$rc" ;;
+    esac
+}
+
+load_module() {
+    module=$1
+    timeout_seconds=${2:-4}
+    [ -n "$module" ] || return 0
+
+    run_with_timeout "$timeout_seconds" /sbin/modprobe -q "$module" 2>/tmp/modprobe.err
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log_console "loaded module $module"
+        return 0
+    fi
+
+    error=$($BB cat /tmp/modprobe.err 2>/dev/null || true)
+    log_console "failed to load module $module rc=$rc ${error}"
+    return "$rc"
+}
+
+wait_for_interface() {
+    iface=$1
+    timeout_seconds=${2:-8}
+    elapsed=0
+
+    while [ "$elapsed" -lt "$timeout_seconds" ]; do
+        [ -e "/sys/class/net/$iface" ] && return 0
+        [ -x /sbin/mdev ] && /sbin/mdev -s 2>/dev/null || true
+        $BB sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    return 1
+}
+
+interface_ipv4_cidr() {
+    iface=$1
+    ip -4 -o addr show dev "$iface" scope global 2>/dev/null |
+        $BB awk '{ print $4 }' | $BB head -n 1
+}
+
+interface_default_gateway() {
+    iface=$1
+    ip -4 route show default dev "$iface" 2>/dev/null | $BB awk '
+        $1 == "default" {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "via" && i < NF) {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }
+    '
+}
+
+configure_host_link_ipv4() {
+    iface=$1
+
+    if ip -4 address replace "$HOST_LINK_GUEST_CIDR" dev "$iface" \
+        2>/tmp/thrurndis-host-link-address.err; then
+        log_console "host link $iface IPv4 $HOST_LINK_GUEST_CIDR"
+        return 0
+    fi
+
+    output=$($BB cat /tmp/thrurndis-host-link-address.err 2>/dev/null || true)
+    log_console "failed to configure host link $HOST_LINK_GUEST_CIDR on $iface: ${output}"
+    return 1
+}
+
+configure_vznat_ipv4() {
+    iface=$1
+    udhcpc_log="/tmp/udhcpc-$iface.log"
+    udhcpc_script=""
+
+    if ! wait_for_interface "$iface" "$VZNAT_WAIT_SECONDS"; then
+        log_console "VZNAT interface $iface not found"
+        return 1
+    fi
+
+    log_console "requesting IPv4 DHCP on VZNAT interface $iface"
+    ip link set dev "$iface" up 2>/dev/null || $BB ifconfig "$iface" up 2>/dev/null || true
+
+    if [ -f /usr/share/udhcpc/default.script ]; then
+        udhcpc_script="-s /usr/share/udhcpc/default.script"
+    fi
+
+    run_with_timeout "$VZNAT_DHCP_TOTAL_TIMEOUT_SECONDS" \
+        udhcpc -i "$iface" -q -n -t "$VZNAT_DHCP_ATTEMPTS" \
+        -T "$VZNAT_DHCP_TIMEOUT_SECONDS" $udhcpc_script >"$udhcpc_log" 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        output=$($BB tail -n 3 "$udhcpc_log" 2>/dev/null | $BB tr '\n' ' ' || true)
+        log_console "VZNAT interface $iface DHCP failed rc=$rc ${output}"
+        return 1
+    fi
+
+    cidr=$(interface_ipv4_cidr "$iface")
+    gateway=$(interface_default_gateway "$iface")
+    if [ -z "$cidr" ] || [ -z "$gateway" ]; then
+        log_console "VZNAT DHCP completed without an IPv4 CIDR and default gateway"
+        return 1
+    fi
+
+    ipv4=${cidr%%/*}
+    log_console "VZNAT interface $iface IPv4 $cidr via $gateway"
+
+    if ! configure_host_link_ipv4 "$iface"; then
+        return 1
+    fi
+
+    # Host contract: these stable, line-oriented markers describe the runtime
+    # VZNAT lease used to discover the VM-created bridge. Data traffic instead
+    # uses the fixed host-link addresses on that bridge after the gateway helper
+    # emits THRURNDIS_RNDIS_ROUTE_READY=1.
+    log_console "THRURNDIS_VZNAT_IPV4=$ipv4"
+    log_console "THRURNDIS_VZNAT_CIDR=$cidr"
+    log_console "THRURNDIS_VZNAT_GATEWAY=$gateway"
+    return 0
+}
+
+log_console "starting ThruRNDIS VZNAT network one-shot"
+for module in virtio_pci virtio_mmio virtio_net af_packet; do
+    load_module "$module" 4 || true
+done
+
+if configure_vznat_ipv4 "$VZNAT_IFACE"; then
+    log_console "ThruRNDIS VZNAT network one-shot finished; usb0-watcher handles RNDIS routing"
+else
+    log_console "ThruRNDIS VZNAT network one-shot failed; no host route marker emitted"
+fi
+exit 0

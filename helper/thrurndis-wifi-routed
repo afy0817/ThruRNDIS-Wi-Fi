@@ -1,0 +1,205 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 GodSeon
+# SPDX-License-Identifier: MIT
+#
+# ThruRNDIS-Wi-Fi route daemon (root, launchd KeepAlive).
+#   thrurndis-wifi-routed <config-file>
+#
+# Whenever ThruRNDIS's host link (192.168.100.2) is up, keeps exactly the
+# IPv4 routes requested in <config-file> pointed at the guest 192.168.100.1:
+#   mode=split|full|off
+#   route=10.0.0.0/24        (repeatable; split and full)
+# full adds 0.0.0.0/1 + 128.0.0.0/1, which outrank the Wi-Fi default route
+# without touching the service order. The config is user-writable, so every
+# value is validated and the gateway is fixed.
+#
+# ThruRNDIS's Bond service sorts above Wi-Fi, so on its own it becomes the
+# primary service and takes the Mac's default route and DNS, which breaks
+# the Mac's internet whenever the dongle's network has none. In every mode
+# the daemon keeps thrurndis-wifi-rank running, which holds an IPMonitor "never
+# primary" assertion on the Bond interface (full mode reaches the dongle
+# through the /1 routes alone, so DNS stays on the built-in network too);
+# configd drops it when that process ends (uninstall). The Bond name is
+# remembered so the assertion is already in place the next time ThruRNDIS
+# creates it.
+#
+# What the app shows comes from /var/run/thrurndis-wifi-routed.status:
+#   primary=<interface of the default route>
+#   conflict=<cidr> <gateway>    (a route the daemon will not replace)
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+CONFIG=${1:?usage: thrurndis-wifi-routed <config-file>}
+GUEST=192.168.100.1
+HOST_LINK=192.168.100.2
+STATE=/var/run/thrurndis-wifi-routed.state
+STATUS=/var/run/thrurndis-wifi-routed.status
+RANK_TOOL=/usr/local/libexec/thrurndis-wifi-rank
+RANK_PID=/var/run/thrurndis-wifi-rank.pid
+BOND_NAME=/var/db/thrurndis-wifi-routed.bond
+INTERVAL=2
+
+log() {
+    logger -t thrurndis-wifi-routed "$*"
+}
+
+valid_cidr() {
+    printf '%s\n' "$1" | awk -F '[./]' '
+        NF != 5 { exit 1 }
+        {
+            for (i = 1; i <= 5; i++) if ($i !~ /^[0-9]+$/) exit 1
+            for (i = 1; i <= 4; i++) if ($i > 255) exit 1
+            if ($5 < 1 || $5 > 32) exit 1
+        }'
+}
+
+config_mode() {
+    [ -f "$CONFIG" ] || return 0
+    awk -F '=' '$1 == "mode" { print $2; exit }' "$CONFIG"
+}
+
+desired_routes() {
+    case "$1" in
+        full) echo 0.0.0.0/1; echo 128.0.0.0/1 ;;
+        split) ;;
+        *) return 0 ;;
+    esac
+    awk -F '=' '$1 == "route" { print $2 }' "$CONFIG" | while read -r cidr; do
+        valid_cidr "$cidr" && echo "$cidr"
+    done
+}
+
+# RTM_GET with a netmask is an exact-match lookup on macOS.
+route_via_guest() {
+    route -n get -net "$1" 2>/dev/null | grep -q "gateway: $GUEST\$"
+}
+
+# Ours and leaving through the Bond ($bond, set in the main loop).
+route_present() {
+    info=$(route -n get -net "$1" 2>/dev/null)
+    printf '%s\n' "$info" | grep -q "gateway: $GUEST\$" &&
+        printf '%s\n' "$info" | grep -q "interface: $bond\$"
+}
+
+# The Bond's own routes are scoped (it is never primary), so a plain add
+# resolves the guest through whatever covers 192.168.100.1 unscoped: a VPN's
+# /2 routes or the default route. Name the Bond, replace a route of ours
+# bound elsewhere, and fall back to an unscoped host route for the guest.
+# route(8) can exit 0 when the destination already has a route, so the
+# table is what decides.
+add_route() {
+    cidr=$1
+    route_via_guest "$cidr" && route -n delete -net "$cidr" "$GUEST" >/dev/null 2>&1
+    route -n add -net "$cidr" "$GUEST" -ifp "$bond" >/dev/null 2>&1
+    route_present "$cidr" && return 0
+    route -n add -host "$GUEST" -interface "$bond" >/dev/null 2>&1
+    route_via_guest "$cidr" && route -n delete -net "$cidr" "$GUEST" >/dev/null 2>&1
+    route -n add -net "$cidr" "$GUEST" >/dev/null 2>&1
+    route_present "$cidr"
+}
+
+route_gateway() {
+    route -n get -net "$1" 2>/dev/null | awk '/gateway:/ { print $2; exit }'
+}
+
+primary_interface() {
+    route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }'
+}
+
+host_link_interface() {
+    ifconfig -a inet 2>/dev/null | awk -v ip="$HOST_LINK" '
+        /^[a-z]/ { iface = $1; sub(/:$/, "", iface) }
+        $1 == "inet" && $2 == ip { print iface; exit }'
+}
+
+# Keeps one thrurndis-wifi-rank process holding <ifname> at "never"; an empty name
+# releases it. A holder that dies at once is not restarted for the same
+# name until the host link changes state.
+hold_rank() {
+    want=$1
+    pid=""
+    held=""
+    [ -f "$RANK_PID" ] && read -r pid held <"$RANK_PID"
+    if [ -n "$pid" ] && [ "$held" = "$want" ] && kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
+    if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null && log "released never-primary assertion on $held"
+        rm -f "$RANK_PID"
+    fi
+    [ -n "$want" ] && [ "$want" != "$rank_failed" ] && [ -x "$RANK_TOOL" ] || return 0
+
+    "$RANK_TOOL" "$want" never >/dev/null 2>/tmp/thrurndis-wifi-rank.err &
+    pid=$!
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+        printf '%s %s\n' "$pid" "$want" >"$RANK_PID"
+        log "holding $want never-primary; default route is on $(primary_interface)"
+    else
+        rank_failed=$want
+        log "could not hold $want never-primary: $(cat /tmp/thrurndis-wifi-rank.err 2>/dev/null)"
+    fi
+}
+
+# Rewrites the status file when it changes; returns 1 when it did not.
+write_status() {
+    new=$(printf 'primary=%s\n%s' "$(primary_interface)" "$1")
+    [ "$new" = "$(cat "$STATUS" 2>/dev/null)" ] && return 1
+    printf '%s\n' "$new" >"$STATUS.tmp" && chmod 644 "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
+}
+
+log "started with $CONFIG"
+: >"$STATE"
+rank_failed=""
+link_was_up=""
+# A holder left by a previous instance (or started by install.sh) is adopted
+# by hold_rank, so the Bond never becomes primary while the daemon restarts.
+
+while true; do
+    mode=$(config_mode)
+    conflicts=""
+    bond=$(host_link_interface)
+    if [ "${bond:+up}" != "$link_was_up" ]; then
+        rank_failed=""
+        link_was_up=${bond:+up}
+    fi
+    if [ -n "$bond" ] && [ "$bond" != "$(cat "$BOND_NAME" 2>/dev/null)" ]; then
+        printf '%s\n' "$bond" >"$BOND_NAME"
+    fi
+    hold_rank "${bond:-$(cat "$BOND_NAME" 2>/dev/null)}"
+
+    if [ -n "$bond" ]; then
+        desired=$(desired_routes "$mode" | sort -u)
+        owned=""
+        for cidr in $desired; do
+            if ! route_present "$cidr"; then
+                if add_route "$cidr"; then
+                    log "added $cidr via $GUEST on $bond"
+                else
+                    conflicts="${conflicts}conflict=$cidr $(route_gateway "$cidr")
+"
+                    continue
+                fi
+            fi
+            owned="$owned$cidr
+"
+        done
+        # Only routes that point at the guest are ours to delete; macOS
+        # deletes by destination, so a same-prefix route of the user's
+        # would otherwise go too.
+        for cidr in $(cat "$STATE"); do
+            if ! printf '%s' "$owned" | grep -qx "$cidr" && route_via_guest "$cidr"; then
+                route -n delete -net "$cidr" "$GUEST" >/dev/null 2>&1 && log "removed $cidr"
+            fi
+        done
+        printf '%s' "$owned" >"$STATE"
+    else
+        # The routes left with the host link; nothing to delete.
+        [ -s "$STATE" ] && : >"$STATE"
+    fi
+    if write_status "$conflicts" && [ -n "$conflicts" ]; then
+        log "not replacing existing routes: $(printf '%s' "$conflicts" | tr '\n' ';')"
+    fi
+    sleep "$INTERVAL"
+done

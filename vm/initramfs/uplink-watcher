@@ -1,0 +1,134 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 Afcoo
+# SPDX-FileCopyrightText: 2026 GodSeon
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Derived from ThruRNDIS_VM_Assets usb0-watcher. Instead of watching only usb0,
+# it picks one upstream per loop: usb0 (RNDIS) when present, otherwise wlan0
+# once wpa_supplicant has associated and wlan0 has an address (DHCP lease or
+# static). The selected interface is handed to eth0-usb0-gateway through
+# THRURNDIS_RNDIS_IFACE, so ThruRNDIS sees the same console markers; wlan0
+# also gets THRURNDIS_RNDIS_ALLOW_SUBNET_ONLY=1, because a static network may
+# have no router or DNS server and its address is managed by wpa-action.
+# Every call holds the ready marker (THRURNDIS_RNDIS_HOLD_ROUTE_READY=1): the
+# Mac's host link then lives as long as the VM, across Wi-Fi drops and
+# network switches; ThruRNDIS-Wi-Fi keeps that Bond from becoming the Mac's primary
+# service and withdraws its own routes while the uplink is down.
+
+BB=/usr/bin/busybox
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export PATH
+
+RNDIS_IFACE=usb0
+WLAN_IFACE=${THRURNDIS_WIFI_WLAN_IFACE:-wlan0}
+WLAN_RESOLV_CONF=${THRURNDIS_WIFI_WLAN_RESOLV_CONF:-/run/thrurndis-wifi/resolv.conf}
+WLAN_DISCARD_RESOLV_CONF=/run/thrurndis-wifi/resolv.discard
+WATCH_INTERVAL_SECONDS=${THRURNDIS_USB0_WATCH_INTERVAL_SECONDS:-2}
+GATEWAY_SCRIPT=${THRURNDIS_GATEWAY_SCRIPT:-/usr/local/sbin/eth0-usb0-gateway}
+
+log() {
+    echo "thrurndis-wifi-uplink-watcher: $*" >/dev/kmsg 2>/dev/null || true
+}
+
+log_console() {
+    log "$*"
+    if [ -c /dev/console ]; then
+        echo "thrurndis-wifi-uplink-watcher: $*" >/dev/console 2>/dev/null || true
+    else
+        echo "thrurndis-wifi-uplink-watcher: $*" 2>/dev/null || true
+    fi
+}
+
+wlan_ready() {
+    [ -e "/sys/class/net/$WLAN_IFACE" ] || return 1
+    carrier=$($BB cat "/sys/class/net/$WLAN_IFACE/carrier" 2>/dev/null || true)
+    [ "$carrier" = 1 ] || return 1
+    ip -4 -o addr show dev "$WLAN_IFACE" scope global 2>/dev/null | $BB grep -q inet
+}
+
+select_uplink() {
+    if [ -e "/sys/class/net/$RNDIS_IFACE" ]; then
+        echo "$RNDIS_IFACE"
+    elif wlan_ready; then
+        echo "$WLAN_IFACE"
+    fi
+}
+
+# usb0 keeps the upstream behaviour (/etc/resolv.conf). wlan0 DNS comes from
+# wlan0-dhcp's own resolv file; "down" gets a throwaway file so tearing the
+# gateway down never wipes a still-valid wlan0 lease.
+run_gateway() {
+    iface=$1
+    shift
+    export THRURNDIS_RNDIS_HOLD_ROUTE_READY=1
+    if [ "$iface" = "$RNDIS_IFACE" ]; then
+        THRURNDIS_RNDIS_IFACE=$iface "$GATEWAY_SCRIPT" "$@"
+    elif [ "$1" = down ]; then
+        THRURNDIS_RNDIS_IFACE=$iface THRURNDIS_RNDIS_RESOLV_CONF=$WLAN_DISCARD_RESOLV_CONF \
+            THRURNDIS_RNDIS_ALLOW_SUBNET_ONLY=1 "$GATEWAY_SCRIPT" "$@"
+    else
+        THRURNDIS_RNDIS_IFACE=$iface THRURNDIS_RNDIS_RESOLV_CONF=$WLAN_RESOLV_CONF \
+            THRURNDIS_RNDIS_ALLOW_SUBNET_ONLY=1 "$GATEWAY_SCRIPT" "$@"
+    fi
+}
+
+$BB mkdir -p /run/thrurndis-wifi
+current=""
+last_ready=""
+
+log_console "started; watching $RNDIS_IFACE and $WLAN_IFACE every ${WATCH_INTERVAL_SECONDS}s"
+
+while true; do
+    uplink=$(select_uplink)
+
+    if [ "$uplink" != "$current" ]; then
+        if [ -n "$current" ]; then
+            log_console "uplink $current is no longer usable; clearing gateway state"
+            run_gateway "$current" down || true
+        fi
+        current=$uplink
+        last_ready=""
+        if [ -n "$current" ]; then
+            log_console "uplink $current selected"
+        fi
+    fi
+
+    if [ -n "$current" ]; then
+        if run_gateway "$current" status >/dev/null 2>&1; then
+            if [ "$last_ready" != "ready" ]; then
+                log_console "$current gateway is ready"
+            fi
+            last_ready="ready"
+        else
+            case "$last_ready" in
+                ready)
+                    log_console "$current gateway state changed; reconfiguring"
+                    ;;
+                configuring|failed|incomplete)
+                    :
+                    ;;
+                *)
+                    log_console "$current gateway is not ready; configuring"
+                    ;;
+            esac
+
+            last_ready="configuring"
+            if run_gateway "$current" up; then
+                if run_gateway "$current" status >/dev/null 2>&1; then
+                    log_console "$current gateway configured"
+                    last_ready="ready"
+                else
+                    log_console "$current gateway configuration completed but status is incomplete"
+                    last_ready="incomplete"
+                fi
+            else
+                log_console "$current gateway configuration failed; will retry"
+                last_ready="failed"
+            fi
+        fi
+    else
+        [ -x /sbin/mdev ] && /sbin/mdev -s 2>/dev/null || true
+    fi
+
+    $BB sleep "$WATCH_INTERVAL_SECONDS"
+done

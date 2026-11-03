@@ -1,0 +1,47 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 GodSeon
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Respawned by init. Serves the ThruRNDIS-Wi-Fi control API on TCP 8080 for the macOS
+# app. The port is reachable only through eth0 (the VZNAT link to the Mac);
+# if that filter cannot be installed the API stays down instead of being
+# exposed on the Wi-Fi side.
+
+BB=/usr/bin/busybox
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export PATH
+
+API_PORT=8080
+INGRESS_IFACE=${THRURNDIS_VZNAT_IFACE:-eth0}
+WWW_ROOT=/usr/local/share/thrurndis-wifi/www
+
+log_console() {
+    echo "thrurndis-wifi-httpd: $*" >/dev/kmsg 2>/dev/null || true
+    if [ -c /dev/console ]; then
+        echo "thrurndis-wifi-httpd: $*" >/dev/console 2>/dev/null || true
+    fi
+}
+
+for module in nfnetlink nf_tables; do
+    /sbin/modprobe -q "$module" 2>/dev/null || true
+done
+
+if ! nft -f - 2>/tmp/thrurndis-wifi-httpd-nft.err <<EOF
+table inet thrurndis-wifi_api
+delete table inet thrurndis-wifi_api
+table inet thrurndis-wifi_api {
+    chain input {
+        type filter hook input priority 0; policy accept;
+        tcp dport $API_PORT iifname != "$INGRESS_IFACE" drop
+    }
+}
+EOF
+then
+    output=$($BB cat /tmp/thrurndis-wifi-httpd-nft.err 2>/dev/null | $BB tr '\n' ' ' || true)
+    log_console "refusing to start API: input filter failed: ${output}"
+    $BB sleep 10
+    exit 1
+fi
+
+log_console "control API listening on port $API_PORT ($INGRESS_IFACE only)"
+exec httpd -f -p "$API_PORT" -h "$WWW_ROOT"

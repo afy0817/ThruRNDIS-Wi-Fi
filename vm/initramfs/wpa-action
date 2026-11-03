@@ -1,0 +1,102 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 GodSeon
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# wpa_cli action script: <ifname> CONNECTED|DISCONNECTED.
+# Restarts the wlan0 DHCP client on every association so a network switch
+# always gets a fresh lease, and drops the lease when the link goes away.
+# A network saved with a static address (/run/thrurndis-wifi/static) gets that
+# address instead, unless duplicate address detection finds another host
+# already using it.
+
+BB=/usr/bin/busybox
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export PATH
+
+IFACE=${1:-wlan0}
+EVENT=${2:-}
+DHCP_PID=/run/thrurndis-wifi/udhcpc.pid
+RESOLV_CONF=/run/thrurndis-wifi/resolv.conf
+STATIC_FILE=/run/thrurndis-wifi/static
+IP_ERROR=/run/thrurndis-wifi/ip-error
+
+log() {
+    echo "thrurndis-wifi-wpa-action: $*" >/dev/kmsg 2>/dev/null || true
+    if [ -c /dev/console ]; then
+        echo "thrurndis-wifi-wpa-action: $*" >/dev/console 2>/dev/null || true
+    fi
+}
+
+stop_dhcp() {
+    pid=$($BB cat "$DHCP_PID" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        tries=0
+        while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 5 ]; do
+            $BB sleep 1
+            tries=$((tries + 1))
+        done
+    fi
+    rm -f "$DHCP_PID"
+}
+
+static_value() {
+    $BB awk -F '=' -v key="$1" '$1 == key { print $2; exit }' "$STATIC_FILE"
+}
+
+apply_static() {
+    address=$(static_value ip)
+    prefix=$(static_value prefix)
+
+    # The Mac's own Wi-Fi may be on the same network with the same manual
+    # address; two hosts answering ARP for it would break both.
+    probe=$(arping -D -I "$IFACE" -c 2 -w 3 "$address" 2>&1)
+    if printf '%s\n' "$probe" | $BB grep -q 'reply from'; then
+        owner=$(printf '%s\n' "$probe" |
+            $BB awk '/reply from/ { gsub(/[][]/, "", $5); print $5; exit }')
+        log "$address is already used on $IFACE by ${owner:-another host}; not assigning it"
+        printf 'conflict %s\n' "$owner" >"$IP_ERROR"
+        return 1
+    fi
+
+    log "$IFACE associated; assigning static $address/$prefix"
+    interface=$IFACE ip=$address mask=$prefix router=$(static_value gateway) \
+        dns=$(static_value dns) domain='' THRURNDIS_WIFI_ADDRESSING=static \
+        /usr/local/sbin/wlan0-dhcp bound
+    # Extra routes of this network; eth0-usb0-gateway copies them into the
+    # host-link policy table.
+    $BB awk -F '=' '$1 == "route" { print $2 }' "$STATIC_FILE" | while read -r destination via; do
+        ip -4 route replace "$destination" via "$via" dev "$IFACE" 2>/dev/null ||
+            log "could not add route $destination via $via"
+    done
+    # Neighbours may still map this address to whoever held it last.
+    arping -U -I "$IFACE" -c 2 "$address" >/dev/null 2>&1 &
+}
+
+case "$EVENT" in
+    CONNECTED)
+        # rtw89 USB power saving costs hundreds of milliseconds and heavy
+        # loss on a weak link; the dongle is mains-powered anyway.
+        iw dev "$IFACE" set power_save off 2>/dev/null ||
+            log "could not turn off power saving on $IFACE"
+        stop_dhcp
+        rm -f "$IP_ERROR"
+        if [ -s "$STATIC_FILE" ]; then
+            apply_static || true
+        else
+            log "$IFACE associated; requesting DHCP"
+            udhcpc -i "$IFACE" -b -R -p "$DHCP_PID" -s /usr/local/sbin/wlan0-dhcp \
+                -x hostname:thrurndis-wifi -t 6 -T 3 -A 10 >/tmp/udhcpc-"$IFACE".log 2>&1
+        fi
+        ;;
+    DISCONNECTED)
+        log "$IFACE disassociated; dropping lease"
+        stop_dhcp
+        rm -f "$IP_ERROR"
+        ip -4 addr flush dev "$IFACE" 2>/dev/null || true
+        ip -4 route flush dev "$IFACE" 2>/dev/null || true
+        : >"$RESOLV_CONF"
+        rm -f /run/thrurndis-wifi/lease
+        ;;
+esac
+exit 0

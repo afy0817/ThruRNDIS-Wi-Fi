@@ -1,0 +1,224 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 GodSeon
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Sole writer of /run/thrurndis-wifi/wpa_supplicant.conf and /run/thrurndis-wifi/static.
+#   thrurndis-wifi-config write <ssid-hex> <psk-hex|""> <sae-hex|""> <hidden 0|1> \
+#       [<ipv4-hex> <prefix> <gateway-hex|""> <dns-hex|""> <routes-hex|"">]
+#   thrurndis-wifi-config clear
+#   thrurndis-wifi-config apply      (ask a running wpa_supplicant to reload)
+# Every value is hex (or a fixed token), so nothing user-controlled is ever
+# quoted into the config file. An IPv4 address replaces DHCP for that
+# network (wpa-action reads /run/thrurndis-wifi/static); IPv4 values are 8 hex
+# digits each and the DNS argument holds up to three of them back to back.
+# Each extra route is <destination 8><prefix 2><gateway 8> hex digits, up to
+# eight back to back; the gateway must be on the static network.
+
+BB=/usr/bin/busybox
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export PATH
+
+WLAN_IFACE=${THRURNDIS_WIFI_WLAN_IFACE:-wlan0}
+CONF=/run/thrurndis-wifi/wpa_supplicant.conf
+NETWORK_FILE=/run/thrurndis-wifi/network
+STATIC_FILE=/run/thrurndis-wifi/static
+
+is_hex() {
+    case "$1" in
+        ''|*[!0-9a-fA-F]*) return 1 ;;
+    esac
+    return 0
+}
+
+valid_ssid() {
+    is_hex "$1" || return 1
+    len=${#1}
+    [ $((len % 2)) -eq 0 ] && [ "$len" -ge 2 ] && [ "$len" -le 64 ]
+}
+
+valid_psk() {
+    [ -z "$1" ] && return 0
+    is_hex "$1" && [ "${#1}" -eq 64 ]
+}
+
+valid_sae() {
+    [ -z "$1" ] && return 0
+    is_hex "$1" || return 1
+    len=${#1}
+    [ $((len % 2)) -eq 0 ] && [ "$len" -le 512 ]
+}
+
+valid_unicast_hex() {
+    is_hex "$1" && [ "${#1}" -eq 8 ] || return 1
+    first=$((0x$(printf '%s' "$1" | $BB cut -c 1-2)))
+    [ "$first" -ne 0 ] && [ "$first" -ne 127 ] && [ "$first" -lt 224 ]
+}
+
+valid_dns_list() {
+    [ -z "$1" ] && return 0
+    len=${#1}
+    [ $((len % 8)) -eq 0 ] && [ "$len" -le 24 ] || return 1
+    for server in $(printf '%s' "$1" | $BB sed 's/.\{8\}/& /g'); do
+        valid_unicast_hex "$server" || return 1
+    done
+}
+
+hex_to_ipv4() {
+    # shellcheck disable=SC2046
+    set -- $(printf '%s' "$1" | $BB sed 's/../0x& /g')
+    printf '%d.%d.%d.%d' "$1" "$2" "$3" "$4"
+}
+
+mask_of() {
+    echo $(( (0xffffffff << (32 - $1)) & 0xffffffff ))
+}
+
+# Prints "route=<cidr> <gateway>" lines for the routes argument.
+route_lines() {
+    routes=$1
+    address=$2
+    prefix=$3
+    [ -z "$routes" ] && return 0
+    len=${#routes}
+    is_hex "$routes" && [ $((len % 18)) -eq 0 ] && [ "$len" -le 144 ] || return 1
+    mask=$(mask_of "$prefix")
+    network=$(( 0x$address & mask ))
+    for item in $(printf '%s' "$routes" | $BB sed 's/.\{18\}/& /g'); do
+        destination=$(printf '%s' "$item" | $BB cut -c 1-8)
+        length=$((0x$(printf '%s' "$item" | $BB cut -c 9-10)))
+        via=$(printf '%s' "$item" | $BB cut -c 11-18)
+        [ "$length" -ge 1 ] && [ "$length" -le 32 ] || return 1
+        [ $(( 0x$destination & ~$(mask_of "$length") & 0xffffffff )) -eq 0 ] || return 1
+        valid_unicast_hex "$via" || return 1
+        [ $(( 0x$via & mask )) -eq "$network" ] && [ "$via" != "$address" ] || return 1
+        printf 'route=%s/%s %s\n' "$(hex_to_ipv4 "$destination")" "$length" "$(hex_to_ipv4 "$via")"
+    done
+}
+
+# Validates the optional static IPv4 arguments and prints the static file
+# contents (nothing for DHCP).
+static_lines() {
+    address=$1
+    prefix=$2
+    gateway=$3
+    dns=$4
+    routes=$5
+
+    if [ -z "$address" ]; then
+        [ -z "$prefix$gateway$dns$routes" ] || return 1
+        return 0
+    fi
+    valid_unicast_hex "$address" || return 1
+    case "$prefix" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$prefix" -ge 1 ] && [ "$prefix" -le 32 ] || return 1
+    [ -z "$gateway" ] || valid_unicast_hex "$gateway" || return 1
+    valid_dns_list "$dns" || return 1
+
+    printf 'ip=%s\n' "$(hex_to_ipv4 "$address")"
+    printf 'prefix=%s\n' "$prefix"
+    printf 'gateway=%s\n' "$([ -n "$gateway" ] && hex_to_ipv4 "$gateway")"
+    servers=""
+    for server in $(printf '%s' "$dns" | $BB sed 's/.\{8\}/& /g'); do
+        servers="$servers${servers:+ }$(hex_to_ipv4 "$server")"
+    done
+    printf 'dns=%s\n' "$servers"
+    route_lines "$routes" "$address" "$prefix"
+}
+
+write_header() {
+    country=$($BB cat /run/thrurndis-wifi/country 2>/dev/null || echo KR)
+    case "$country" in
+        [A-Z][A-Z]) ;;
+        *) country=KR ;;
+    esac
+    printf 'ctrl_interface=/run/wpa_supplicant\n'
+    printf 'update_config=0\n'
+    printf 'ap_scan=1\n'
+    printf 'country=%s\n' "$country"
+}
+
+install_conf() {
+    tmp=$CONF.tmp.$$
+    umask 077
+    cat >"$tmp" || { rm -f "$tmp"; return 1; }
+    $BB mv -f "$tmp" "$CONF"
+}
+
+cmd_write() {
+    ssid=$1
+    psk=$2
+    sae=$3
+    hidden=$4
+
+    valid_ssid "$ssid" || { echo "invalid ssid" >&2; return 1; }
+    valid_psk "$psk" || { echo "invalid psk" >&2; return 1; }
+    valid_sae "$sae" || { echo "invalid sae" >&2; return 1; }
+    case "$hidden" in
+        0|1) ;;
+        *) echo "invalid hidden flag" >&2; return 1 ;;
+    esac
+    static=$(static_lines "$5" "$6" "$7" "$8" "$9") || { echo "invalid static ipv4" >&2; return 1; }
+
+    {
+        write_header
+        printf 'network={\n'
+        printf '\tssid=%s\n' "$ssid"
+        [ "$hidden" = 1 ] && printf '\tscan_ssid=1\n'
+        if [ -n "$psk" ] && [ -n "$sae" ]; then
+            printf '\tkey_mgmt=WPA-PSK WPA-PSK-SHA256 SAE\n'
+            printf '\tpsk=%s\n' "$psk"
+            printf '\tsae_password=%s\n' "$sae"
+            printf '\tieee80211w=1\n'
+        elif [ -n "$psk" ]; then
+            printf '\tkey_mgmt=WPA-PSK WPA-PSK-SHA256\n'
+            printf '\tpsk=%s\n' "$psk"
+            printf '\tieee80211w=1\n'
+        elif [ -n "$sae" ]; then
+            printf '\tkey_mgmt=SAE\n'
+            printf '\tsae_password=%s\n' "$sae"
+            printf '\tieee80211w=2\n'
+        else
+            printf '\tkey_mgmt=NONE\n'
+        fi
+        printf '}\n'
+    } | install_conf || return 1
+
+    if [ -n "$static" ]; then
+        printf '%s\n' "$static" >"$STATIC_FILE.tmp.$$" && $BB mv -f "$STATIC_FILE.tmp.$$" "$STATIC_FILE"
+    else
+        rm -f "$STATIC_FILE"
+    fi
+    printf '%s\n' "$ssid" >"$NETWORK_FILE"
+}
+
+cmd_clear() {
+    write_header | install_conf || return 1
+    rm -f "$NETWORK_FILE" "$STATIC_FILE"
+}
+
+cmd_apply() {
+    # Marks where the current configuration starts in the wpa_supplicant log,
+    # so failures of a previous network are not reported for the new one.
+    logger -t thrurndis-wifi "configuration changed" 2>/dev/null || true
+    [ -S "/run/wpa_supplicant/$WLAN_IFACE" ] || return 0
+    wpa_cli -p /run/wpa_supplicant -i "$WLAN_IFACE" reconfigure >/dev/null 2>&1
+}
+
+case "${1:-}" in
+    write)
+        shift
+        cmd_write "${1:-}" "${2:-}" "${3:-}" "${4:-0}" "${5:-}" "${6:-}" "${7:-}" "${8:-}" "${9:-}"
+        ;;
+    clear)
+        cmd_clear
+        ;;
+    apply)
+        cmd_apply
+        ;;
+    *)
+        echo "usage: $0 {write <ssid-hex> <psk-hex> <sae-hex> <hidden> [<ipv4-hex> <prefix> <gateway-hex> <dns-hex>]|clear|apply}" >&2
+        exit 2
+        ;;
+esac

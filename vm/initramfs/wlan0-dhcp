@@ -1,0 +1,72 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 GodSeon
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# udhcpc script for the Wi-Fi upstream. Unlike the stock default.script it
+# keeps DNS in /run/thrurndis-wifi/resolv.conf (eth0-usb0-gateway reads it through
+# THRURNDIS_RNDIS_RESOLV_CONF) and records the lease for the control API.
+# wpa-action also runs "bound" with udhcpc's variables to apply a static
+# address (THRURNDIS_WIFI_ADDRESSING=static).
+
+BB=/usr/bin/busybox
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export PATH
+
+RESOLV_CONF=/run/thrurndis-wifi/resolv.conf
+LEASE_FILE=/run/thrurndis-wifi/lease
+METRIC=300
+
+deconfig() {
+    ip -4 addr flush dev "$interface" 2>/dev/null || true
+    ip -4 route flush dev "$interface" 2>/dev/null || true
+    : >"$RESOLV_CONF"
+    rm -f "$LEASE_FILE"
+}
+
+bound() {
+    prefix=${mask:-24}
+    # A renew with the same address must not flush it, or established flows
+    # and the gateway's policy route would blink.
+    current=$(ip -4 -o addr show dev "$interface" scope global 2>/dev/null |
+        $BB awk '{ print $4 }' | $BB head -n 1)
+    if [ "$current" != "$ip/$prefix" ]; then
+        ip -4 addr flush dev "$interface" 2>/dev/null || true
+    fi
+    ip -4 addr replace "$ip/$prefix" ${broadcast:+broadcast "$broadcast"} dev "$interface"
+
+    gateway=""
+    for r in $router; do
+        gateway=$r
+        break
+    done
+    if [ -n "$gateway" ]; then
+        ip -4 route replace default via "$gateway" dev "$interface" metric "$METRIC"
+    fi
+
+    tmp=$RESOLV_CONF.tmp.$$
+    : >"$tmp"
+    [ -n "$domain" ] && printf 'search %s\n' "$domain" >>"$tmp"
+    for server in $dns; do
+        printf 'nameserver %s\n' "$server" >>"$tmp"
+    done
+    $BB mv -f "$tmp" "$RESOLV_CONF"
+
+    {
+        printf 'ip=%s\n' "$ip"
+        printf 'prefix=%s\n' "$prefix"
+        printf 'gateway=%s\n' "$gateway"
+        printf 'dns=%s\n' "$(echo $dns)"
+        printf 'lease=%s\n' "${lease:-}"
+        printf 'source=%s\n' "${THRURNDIS_WIFI_ADDRESSING:-dhcp}"
+    } >"$LEASE_FILE"
+}
+
+case "$1" in
+    deconfig|leasefail|nak)
+        deconfig
+        ;;
+    bound|renew)
+        bound
+        ;;
+esac
+exit 0

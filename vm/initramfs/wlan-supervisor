@@ -1,0 +1,99 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 GodSeon
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Respawned by init. Starts wpa_supplicant and its wpa_cli action daemon when
+# wlan0 appears (USB passthrough can attach long after boot) and stops them,
+# together with the wlan0 DHCP client, when the dongle goes away.
+
+BB=/usr/bin/busybox
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export PATH
+
+WLAN_IFACE=${THRURNDIS_WIFI_WLAN_IFACE:-wlan0}
+CONF=/run/thrurndis-wifi/wpa_supplicant.conf
+WPA_PID=/run/thrurndis-wifi/wpa_supplicant.pid
+WPA_CLI_PID=/run/thrurndis-wifi/wpa_cli.pid
+INTERVAL_SECONDS=2
+
+log() {
+    echo "thrurndis-wifi-wlan-supervisor: $*" >/dev/kmsg 2>/dev/null || true
+}
+
+log_console() {
+    log "$*"
+    if [ -c /dev/console ]; then
+        echo "thrurndis-wifi-wlan-supervisor: $*" >/dev/console 2>/dev/null || true
+    else
+        echo "thrurndis-wifi-wlan-supervisor: $*" 2>/dev/null || true
+    fi
+}
+
+pid_alive() {
+    pid=$($BB cat "$1" 2>/dev/null || true)
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+stop_pidfile() {
+    pid=$($BB cat "$1" 2>/dev/null || true)
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    rm -f "$1"
+}
+
+start_wifi() {
+    [ -f "$CONF" ] || /usr/local/sbin/thrurndis-wifi-config clear
+    ip link set dev "$WLAN_IFACE" up 2>/dev/null || true
+
+    if ! pid_alive "$WPA_PID"; then
+        rm -f "/run/wpa_supplicant/$WLAN_IFACE"
+        # -s: events such as CTRL-EVENT-SSID-TEMP-DISABLED reason=WRONG_KEY go to
+        # syslogd (/run/thrurndis-wifi/messages), where the control API reads them.
+        if wpa_supplicant -B -s -i "$WLAN_IFACE" -D nl80211 -c "$CONF" -P "$WPA_PID" \
+            >/tmp/wpa_supplicant.log 2>&1; then
+            log_console "wpa_supplicant started on $WLAN_IFACE"
+        else
+            output=$($BB tail -n 3 /tmp/wpa_supplicant.log 2>/dev/null | $BB tr '\n' ' ' || true)
+            log_console "wpa_supplicant failed on $WLAN_IFACE: ${output}"
+            return 1
+        fi
+    fi
+
+    if ! pid_alive "$WPA_CLI_PID"; then
+        # The control socket appears shortly after wpa_supplicant forks.
+        tries=0
+        while [ ! -S "/run/wpa_supplicant/$WLAN_IFACE" ] && [ "$tries" -lt 10 ]; do
+            $BB sleep 1
+            tries=$((tries + 1))
+        done
+        if wpa_cli -p /run/wpa_supplicant -i "$WLAN_IFACE" -a /usr/local/sbin/wpa-action \
+            -B -P "$WPA_CLI_PID" >/dev/null 2>&1; then
+            log_console "wpa_cli action daemon started"
+        else
+            log_console "wpa_cli action daemon failed to start"
+        fi
+    fi
+}
+
+stop_wifi() {
+    stop_pidfile "$WPA_CLI_PID"
+    stop_pidfile "$WPA_PID"
+    /usr/local/sbin/wpa-action "$WLAN_IFACE" DISCONNECTED
+}
+
+present=""
+log_console "started; watching $WLAN_IFACE every ${INTERVAL_SECONDS}s"
+
+while true; do
+    if [ -e "/sys/class/net/$WLAN_IFACE" ]; then
+        if [ "$present" != yes ]; then
+            log_console "$WLAN_IFACE appeared"
+            present=yes
+        fi
+        start_wifi || true
+    elif [ "$present" = yes ]; then
+        log_console "$WLAN_IFACE disappeared; stopping Wi-Fi services"
+        stop_wifi
+        present=no
+    fi
+    $BB sleep "$INTERVAL_SECONDS"
+done
