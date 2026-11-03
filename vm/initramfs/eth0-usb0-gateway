@@ -7,9 +7,11 @@
 # IPv4 address is configured elsewhere (static, or another DHCP client) and
 # may come without a default gateway or DNS server, such as a router-less
 # Wi-Fi network. Host-link traffic is then routed on-link, the DNS proxy is
-# left out, and this script never runs DHCP on the uplink; routes the uplink
-# has through other gateways (ThruRNDIS-Wi-Fi's per-network extra routes) are copied
-# into the policy table so host-link traffic follows them too.
+# left out, and this script never runs DHCP on the uplink; the uplink's
+# on-link routes (its own subnet) and its routes through other gateways
+# (ThruRNDIS-Wi-Fi's per-network extra routes) are copied into the policy
+# table so host-link traffic follows them too, instead of hairpinning
+# through the uplink's default gateway.
 # THRURNDIS_RNDIS_HOLD_ROUTE_READY=1 keeps THRURNDIS_RNDIS_ROUTE_READY at 1
 # once it has been announced in this boot: ThruRNDIS only starts its managed
 # network once per USB attach, so a single =0 during a Wi-Fi drop or rebuild
@@ -422,6 +424,10 @@ install_policy_route() {
     fi
 
     if [ "$ALLOW_SUBNET_ONLY" = 1 ]; then
+        uplink_link_routes | while read -r destination; do
+            ip route replace "$destination" dev "$RNDIS_IFACE" scope link table "$TABLE_ID" 2>/dev/null ||
+                log_console "failed to copy on-link $destination into table $TABLE_ID"
+        done
         uplink_extra_routes | while read -r destination via; do
             ip route replace "$destination" via "$via" dev "$RNDIS_IFACE" table "$TABLE_ID" 2>/dev/null ||
                 log_console "failed to copy $destination via $via into table $TABLE_ID"
@@ -440,6 +446,13 @@ install_policy_route() {
     output=$($BB cat /tmp/thrurndis-policy-rule.err 2>/dev/null || true)
     log_console "failed to install ingress policy rule for $HOST_LINK_HOST_CIDR on $INGRESS_IFACE: ${output}"
     return 1
+}
+
+# "<destination>" for each on-link route of the uplink, such as its own
+# subnet, other than a default route.
+uplink_link_routes() {
+    ip -4 route show dev "$RNDIS_IFACE" 2>/dev/null |
+        $BB awk '$1 != "default" && $2 != "via" && / scope link/ { print $1 }'
 }
 
 # "<destination> <gateway>" for each route of the uplink through a gateway,
@@ -675,10 +688,16 @@ gateway_status() {
     fi
 
     if [ "$ALLOW_SUBNET_ONLY" = 1 ]; then
-        absent=$(uplink_extra_routes | while read -r destination via; do
-            ip route show table "$TABLE_ID" "$destination" 2>/dev/null |
-                $BB grep -qF "via $via" || echo "$destination via $via"
-        done)
+        absent=$(
+            uplink_link_routes | while read -r destination; do
+                ip route show table "$TABLE_ID" "$destination" 2>/dev/null |
+                    $BB grep -qF "dev $RNDIS_IFACE" || echo "$destination on-link"
+            done
+            uplink_extra_routes | while read -r destination via; do
+                ip route show table "$TABLE_ID" "$destination" 2>/dev/null |
+                    $BB grep -qF "via $via" || echo "$destination via $via"
+            done
+        )
         if [ -n "$absent" ]; then
             echo "missing policy routes: $(echo $absent)"
             missing=1
