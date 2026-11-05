@@ -84,18 +84,17 @@ route_present() {
 
 # The Bond's own routes are scoped (it is never primary), so a plain add
 # resolves the guest through whatever covers 192.168.100.1 unscoped: a VPN's
-# /2 routes or the default route. Name the Bond, replace a route of ours
-# bound elsewhere, and fall back to an unscoped host route for the guest.
+# /2 routes or the default route. Name the Bond and replace a route of ours
+# bound elsewhere; another gateway's route for the destination is left to the
+# caller to report as a conflict. No host route for the guest is added:
+# "-host <guest> -interface <Bond>" becomes a static ARP entry with the Bond's
+# own MAC address, which cuts the Mac off from the guest.
 # route(8) can exit 0 when the destination already has a route, so the
 # table is what decides.
 add_route() {
     cidr=$1
     route_via_guest "$cidr" && route -n delete -net "$cidr" "$GUEST" >/dev/null 2>&1
     route -n add -net "$cidr" "$GUEST" -ifp "$bond" >/dev/null 2>&1
-    route_present "$cidr" && return 0
-    route -n add -host "$GUEST" -interface "$bond" >/dev/null 2>&1
-    route_via_guest "$cidr" && route -n delete -net "$cidr" "$GUEST" >/dev/null 2>&1
-    route -n add -net "$cidr" "$GUEST" >/dev/null 2>&1
     route_present "$cidr"
 }
 
