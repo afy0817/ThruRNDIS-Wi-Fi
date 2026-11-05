@@ -207,6 +207,10 @@ def install_project_files(root: pathlib.Path, src: pathlib.Path, release: dict,
     lines = [f"load {driver.module}" for driver in drivers]
     lines += [f"newid {driver.module} {' '.join(new_id)}" for driver in drivers for new_id in driver.new_ids]
     add_file(root, "etc/thrurndis-wifi/drivers", ("\n".join(lines) + "\n").encode(), 0o644)
+    # rtw88 switches RTL8822BU/8822CU dongles to USB 3 at probe. Passed through
+    # ThruRNDIS that re-enumerates the dongle on the Mac, and at SuperSpeed its
+    # transfers stall (-EPIPE), so the VM keeps restarting.
+    add_file(root, "etc/modprobe.d/thrurndis-wifi.conf", b"options rtw88_usb switch_usb_mode=N\n", 0o644)
     add_file(root, "etc/thrurndis-wifi-release", (json.dumps(release, indent=2) + "\n").encode(), 0o644)
 
 
