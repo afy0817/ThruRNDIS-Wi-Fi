@@ -30,6 +30,9 @@ struct MenuView: View {
                     Text(busy).font(.caption)
                 }
             }
+            if let notice = model.dongleNotice {
+                Text(notice).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
             if let error = model.lastError {
                 Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
@@ -64,9 +67,15 @@ struct MenuView: View {
         } else if !model.thrurndisRunning {
             notice("ThruRNDIS 가 실행 중이 아닙니다.", detail: nil)
             Button("ThruRNDIS 실행") { model.openThruRNDIS() }
+        } else if model.status == nil, model.restartingSince != nil {
+            notice("VM 을 다시 시작하는 중…",
+                   detail: "ThruRNDIS 가 새 VM 을 띄우고 동글을 다시 연결합니다. 이 동글의 USB 자동 연결이 꺼져 있으면 ThruRNDIS 의 연결 확인 창에서 승인하세요.")
         } else if model.status == nil {
             notice("VM 이 아직 실행되지 않았습니다.",
                    detail: "메뉴 막대의 '가상 머신 액세서리' 에서 USB Wi-Fi 동글을 ThruRNDIS 로 넘기세요.")
+        } else if model.status?.isResettingDongle == true {
+            notice("동글을 다시 붙이는 중…",
+                   detail: "USB 송신이 밀려 VM 안에서 동글을 재설정합니다. 15초쯤 끊겼다가 다시 연결됩니다.")
         } else if let id = model.status?.usb_unsupported, !id.isEmpty {
             notice("USB 장치 \(id) 를 맡을 드라이버가 VM 에 없습니다.",
                    detail: "지원하지 않는 동글입니다. vm/drivers.conf 에 드라이버를 추가해 다시 빌드할 수 있습니다(README 의 '다른 동글 쓰기').")
@@ -87,6 +96,17 @@ struct MenuView: View {
                         .controlSize(.small)
                 }
                 Text(addressLine(status)).font(.caption).foregroundStyle(.secondary)
+                if let text = usbTXText(status) {
+                    Text(text).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+                if status.needsVMRestart, model.restartingSince == nil {
+                    HStack {
+                        Text("VM 안에서 동글을 다시 붙여도 송신이 풀리지 않습니다.")
+                            .font(.caption).fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("VM 재시작") { Task { await model.restartVM() } }.controlSize(.small)
+                    }
+                }
                 if status.hasIPConflict {
                     HStack(alignment: .top) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
@@ -564,21 +584,35 @@ struct MenuView: View {
         return model.helperOutdated ? "도우미 업데이트 필요" : "도우미 설치됨"
     }
 
+    private func usbTXText(_ status: GuestAPI.Status) -> String? {
+        guard status.hasUSBTXProblem, !status.needsVMRestart else { return nil }
+        let pending = status.usb_tx_lag ?? 0
+        if status.usb_tx_stall == true {
+            return "동글 송신이 멈췄습니다(USB 대기 \(pending)). 곧 동글을 다시 붙입니다."
+        }
+        return "동글 송신이 밀려 있습니다(USB 대기 \(pending)). 곧 동글을 다시 붙입니다."
+    }
+
     private var headerText: String {
         if let status = model.status {
+            if status.isResettingDongle { return "동글 재설정 중" }
+            if status.usb_tx_stall == true { return "송신 멈춤" }
+            if status.hasUSBTXProblem { return "송신 지연" }
             if status.isAssociated { return status.route_ready ? "연결됨" : "주소 받는 중" }
             return status.device ? "동글 준비됨" : "동글 없음"
         }
+        if model.restartingSince != nil { return "VM 재시작 중" }
         return model.applied ? "VM 대기" : "설정 필요"
     }
 
     private var headerSymbol: String {
-        model.status?.isAssociated == true ? "wifi" : "wifi.exclamationmark"
+        guard let status = model.status, status.isAssociated, !status.hasUSBTXProblem else { return "wifi.exclamationmark" }
+        return "wifi"
     }
 
     private var headerColor: Color {
         guard let status = model.status else { return .secondary }
-        return status.isAssociated && status.route_ready ? .green : .orange
+        return status.isAssociated && status.route_ready && !status.hasUSBTXProblem ? .green : .orange
     }
 }
 

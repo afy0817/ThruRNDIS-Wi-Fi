@@ -55,7 +55,7 @@ final class StatusItemController: NSObject, NSApplicationDelegate {
     private func updateIcon(_ status: GuestAPI.Status?) {
         let symbol: String
         if let status {
-            symbol = status.isAssociated && status.route_ready ? "wifi" : "wifi.exclamationmark"
+            symbol = status.isAssociated && status.route_ready && !status.hasUSBTXProblem ? "wifi" : "wifi.exclamationmark"
         } else {
             symbol = "wifi.slash"
         }

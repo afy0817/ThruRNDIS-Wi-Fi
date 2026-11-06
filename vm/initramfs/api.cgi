@@ -9,6 +9,7 @@
 #   POST ?action=connect&token=T     body: ssid=<hex>&psk=<hex>&sae=<hex>&hidden=0|1
 #                                    [&ip=<hex8>&prefix=<n>&gw=<hex8>&dns=<hex8...>&rt=<hex18...>]
 #   GET  ?action=disconnect&token=T
+#   POST ?action=restart&token=T     power the VM off; ThruRNDIS boots a fresh one
 # Parameters are restricted to [0-9A-Za-z_] so no URL decoding is needed.
 # SSIDs are returned as hex because they are arbitrary bytes.
 
@@ -207,11 +208,24 @@ action_status() {
         esac
     fi
     usb_unsupported=""
-    [ "$device" = false ] && usb_unsupported=$(unsupported_usb || true)
+    # While usb-recover has the driver unbound the dongle looks unclaimed.
+    [ "$device" = false ] && [ ! -d /run/thrurndis-wifi/usb-recover.lock ] && usb_unsupported=$(unsupported_usb || true)
     usb_ids=$($BB cat /sys/class/net/"$WLAN_IFACE"/device/../idVendor 2>/dev/null || true)
     [ -n "$usb_ids" ] && usb_ids="$usb_ids:$($BB cat /sys/class/net/"$WLAN_IFACE"/device/../idProduct 2>/dev/null || true)"
 
-    reply "{\"ok\":true,\"device\":$device,\"usb_id\":$(json_str "$usb_ids"),\"wpa_running\":$(wpa_running && echo true || echo false),\"wpa_state\":$(json_str "$wpa_state"),\"ssid_hex\":$(json_str "$ssid_hex"),\"bssid\":$(json_str "$bssid"),\"freq\":$(json_num "$freq"),\"rssi\":$(json_num "$rssi"),\"key_mgmt\":$(json_str "$key_mgmt"),\"ipv4\":$(json_str "$ipv4"),\"prefix\":$(json_num "$prefix"),\"gateway\":$(json_str "$gateway"),\"dns\":$(json_str "$dns"),\"uplink\":$(json_str "$uplink"),\"route_ready\":$ready,\"configured_ssid_hex\":$(json_str "$configured"),\"auth_error\":$(json_str "$auth_error"),\"ip_source\":$(json_str "$ip_source"),\"ip_error\":$(json_str "$ip_error"),\"ip_conflict_mac\":$(json_str "$ip_conflict_mac"),\"usb_unsupported\":$(json_str "$usb_unsupported"),\"boot_id\":$(json_str "$($BB cat /proc/sys/kernel/random/boot_id 2>/dev/null)")}"
+    # usb-tx-watcher's verdict on the dongle's bulk OUT endpoints and
+    # usb-recover's progress.
+    usb_tx_state=$($BB awk -F '=' '$1 == "state" { print $2 }' /run/thrurndis-wifi/usb-tx 2>/dev/null)
+    usb_tx_pending=$($BB awk -F '=' '$1 == "pending" { print $2 }' /run/thrurndis-wifi/usb-tx 2>/dev/null)
+    case "$usb_tx_state" in
+        ok) usb_tx_lag=0 usb_tx_stall=false ;;
+        lag) usb_tx_lag=$usb_tx_pending usb_tx_stall=false ;;
+        stall) usb_tx_lag=$usb_tx_pending usb_tx_stall=true ;;
+        *) usb_tx_lag="" usb_tx_stall=null ;;
+    esac
+    usb_recover=$($BB awk -F '=' '$1 == "state" && $2 != "idle" { print $2 }' /run/thrurndis-wifi/usb-recover 2>/dev/null)
+
+    reply "{\"ok\":true,\"device\":$device,\"usb_id\":$(json_str "$usb_ids"),\"wpa_running\":$(wpa_running && echo true || echo false),\"wpa_state\":$(json_str "$wpa_state"),\"ssid_hex\":$(json_str "$ssid_hex"),\"bssid\":$(json_str "$bssid"),\"freq\":$(json_num "$freq"),\"rssi\":$(json_num "$rssi"),\"key_mgmt\":$(json_str "$key_mgmt"),\"ipv4\":$(json_str "$ipv4"),\"prefix\":$(json_num "$prefix"),\"gateway\":$(json_str "$gateway"),\"dns\":$(json_str "$dns"),\"uplink\":$(json_str "$uplink"),\"route_ready\":$ready,\"configured_ssid_hex\":$(json_str "$configured"),\"auth_error\":$(json_str "$auth_error"),\"ip_source\":$(json_str "$ip_source"),\"ip_error\":$(json_str "$ip_error"),\"ip_conflict_mac\":$(json_str "$ip_conflict_mac"),\"usb_unsupported\":$(json_str "$usb_unsupported"),\"boot_id\":$(json_str "$($BB cat /proc/sys/kernel/random/boot_id 2>/dev/null)"),\"usb_tx_lag\":$(json_num "$usb_tx_lag"),\"usb_tx_stall\":$usb_tx_stall,\"usb_recover\":$(json_str "$usb_recover")}"
 }
 
 action_results() {
@@ -279,7 +293,21 @@ action_diag() {
     echo "== neighbours"; ip -4 neigh show dev "$WLAN_IFACE" 2>&1
     echo "== wpa_supplicant log"; $BB tail -n 20 /tmp/wpa_supplicant.log 2>/dev/null
     echo "== syslog"; $BB tail -n 80 /run/thrurndis-wifi/messages 2>/dev/null
+    echo "== usb tx"
+    $BB cat /run/thrurndis-wifi/usb-tx /run/thrurndis-wifi/usb-recover 2>/dev/null
+    $BB tail -n 30 /run/thrurndis-wifi/usb-tx.history /run/thrurndis-wifi/usb-recover.history 2>/dev/null
     echo "== dmesg"; $BB dmesg 2>&1 | $BB tail -n 150
+}
+
+# When resetting the dongle inside the VM did not help. ThruRNDIS stops the VM
+# and, with USB Auto Connect on for the dongle, boots a fresh one once the
+# dongle is free again.
+action_restart() {
+    [ "$REQUEST_METHOD" = POST ] || fail "post-required"
+    echo "thrurndis-wifi-api: VM restart requested" >/dev/kmsg 2>/dev/null || true
+    reply '{"ok":true}'
+    # Detached and without our stdout, or httpd keeps the response open.
+    $BB setsid sh -c "$BB sleep 1; $BB poweroff -f" </dev/null >/dev/null 2>&1 &
 }
 
 action_disconnect() {
@@ -301,5 +329,6 @@ case "$(param action "${QUERY_STRING:-}" || true)" in
     connect) action_connect ;;
     disconnect) action_disconnect ;;
     diag) action_diag ;;
+    restart) action_restart ;;
     *) fail "unknown-action" ;;
 esac

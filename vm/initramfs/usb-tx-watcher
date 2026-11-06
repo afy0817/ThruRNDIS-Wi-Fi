@@ -1,0 +1,337 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 GodSeon
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Respawned by init. Once a second, read-only, looks at the Wi-Fi dongle's bulk
+# OUT endpoints through the xHCI debugfs rings. Under the Mac's USB passthrough
+# an endpoint can fall into a state where a transfer only completes after D
+# later ones are queued, so sparse traffic waits for seconds; it can also stop
+# completing altogether. Either one starts usb-recover.
+# State for the control API: /run/thrurndis-wifi/usb-tx (+ usb-tx.history).
+
+BB=/usr/bin/busybox
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export PATH
+
+WLAN_IFACE=${THRURNDIS_WIFI_WLAN_IFACE:-wlan0}
+RUN=/run/thrurndis-wifi
+STATE=$RUN/usb-tx
+HISTORY=$RUN/usb-tx.history
+RECOVER_STATE=$RUN/usb-recover
+RECOVER_LOCK=$RUN/usb-recover.lock
+DEBUGFS=/sys/kernel/debug
+INTERVAL_SECONDS=1
+# A healthy endpoint finishes a transfer in well under a millisecond, so below
+# this many packets per second it is almost never caught with one pending.
+QUIET_TX_PPS=100
+LAG_SECONDS=10
+STALL_SECONDS=5
+STALL_GROWTH=3
+FAILED_CLEAR_SECONDS=60
+HISTORY_MAX_LINES=400
+
+# TRBs between the ring's dequeue and enqueue pointers, link TRBs excluded.
+# The ring may span several segments, so walk the dump order instead of
+# subtracting addresses.
+PENDING_AWK='
+{ a = $2; sub(":", "", a); n++; addr[n] = a; lnk[n] = ($0 ~ /Link/) }
+END {
+    for (i = 1; i <= n; i++) { if (addr[i] == deq) di = i; if (addr[i] == enq) ei = i }
+    if (!di || !ei) { print "?"; exit }
+    c = 0; i = di
+    while (i != ei) { if (!lnk[i]) c++; i = i % n + 1 }
+    print c
+}'
+
+log() {
+    echo "thrurndis-wifi-usb-tx-watcher: $*" >/dev/kmsg 2>/dev/null || true
+}
+
+log_console() {
+    log "$*"
+    if [ -c /dev/console ]; then
+        echo "thrurndis-wifi-usb-tx-watcher: $*" >/dev/console 2>/dev/null || true
+    else
+        echo "thrurndis-wifi-usb-tx-watcher: $*" 2>/dev/null || true
+    fi
+}
+
+uptime_s() {
+    read -r up _ </proc/uptime
+    echo "${up%.*}"
+}
+
+# Sets intf_path, intf, dev, driver, slot and eps ("05:09 06:11 08:15", USB
+# endpoint address : xHCI endpoint index) for the device behind wlan0.
+find_device() {
+    intf_path=$($BB readlink -f "/sys/class/net/$WLAN_IFACE/device" 2>/dev/null) || return 1
+    [ -n "$intf_path" ] && [ -d "$intf_path" ] || return 1
+    intf=${intf_path##*/}
+    dev_path=${intf_path%/*}
+    dev=${dev_path##*/}
+    driver=$($BB readlink "$intf_path/driver" 2>/dev/null) || return 1
+    driver=${driver##*/}
+    slot=""
+    for name in "$DEBUGFS"/usb/xhci/*/devices/*/name; do
+        [ -f "$name" ] || continue
+        if [ "$($BB cat "$name" 2>/dev/null)" = "$dev" ]; then
+            slot=${name%/name}
+            break
+        fi
+    done
+    eps=""
+    for ep in "$intf_path"/ep_*; do
+        [ -d "$ep" ] || continue
+        [ "$($BB cat "$ep/direction" 2>/dev/null)" = out ] || continue
+        [ "$($BB cat "$ep/type" 2>/dev/null)" = Bulk ] || continue
+        address=$($BB cat "$ep/bEndpointAddress" 2>/dev/null)
+        case "$address" in
+            [0-7][0-9a-f]) ;;
+            *) continue ;;
+        esac
+        # xHCI device context index of an OUT endpoint: 2 * number - 1.
+        eps="$eps $address:$(printf '%02d' $((2 * 0x$address - 1)))"
+    done
+    return 0
+}
+
+reset_counters() {
+    for pair in $eps; do
+        index=${pair#*:}
+        eval "quiet_$index=0 frozen_$index=0 grew_$index=0 deq_$index= enq_$index="
+    done
+}
+
+# True when the kernel logged a "not part of TD" transfer event for xHCI
+# endpoint $1 since the last one we reported.
+kernel_reported_stall() {
+    found=$($BB dmesg 2>/dev/null | $BB awk -v ep="for ep $1 " -v after="$kmsg_seen" '
+        index($0, "not part of TD") && index($0, ep) {
+            t = $0; sub(/^\[ */, "", t); sub(/\].*/, "", t)
+            if (t + 0 > after + 0) last = t
+        }
+        END { if (last != "") print last }')
+    [ -n "$found" ] || return 1
+    kmsg_seen=$found
+    log_console "kernel reported 'not part of TD' on xHCI ep$1 at ${found}s"
+    return 0
+}
+
+write_state() {
+    [ "$1 $2 $3 $since" = "$written" ] && return 0
+    written="$1 $2 $3 $since"
+    {
+        echo "state=$1"
+        echo "ep=$2"
+        echo "pending=$3"
+        echo "since=$since"
+        echo "dev=$dev"
+        echo "intf=$intf"
+        echo "driver=$driver"
+    } >"$STATE.tmp" && $BB mv "$STATE.tmp" "$STATE"
+}
+
+note_history() {
+    echo "$(uptime_s) $($BB date +%H:%M:%S) $1 ep=$2 pending=$3 tx=$4" >>"$HISTORY"
+    lines=$($BB wc -l <"$HISTORY")
+    if [ "$lines" -gt "$HISTORY_MAX_LINES" ]; then
+        $BB tail -n $((HISTORY_MAX_LINES / 2)) "$HISTORY" >"$HISTORY.tmp" && $BB mv "$HISTORY.tmp" "$HISTORY"
+    fi
+}
+
+recover_state() {
+    $BB awk -F '=' '$1 == "state" { print $2 }' "$RECOVER_STATE" 2>/dev/null
+}
+
+# Samples every endpoint once; sets fresh (ok / lag / stall / hold / unknown),
+# worst_address and worst_pending.
+sample() {
+    tx=$($BB cat "/sys/class/net/$WLAN_IFACE/statistics/tx_packets" 2>/dev/null)
+    case "$tx" in
+        ''|*[!0-9]*) tx_rate=0 ;;
+        *)
+            tx_rate=0
+            [ -n "$tx_last" ] && [ "$tx" -ge "$tx_last" ] && tx_rate=$((tx - tx_last))
+            tx_last=$tx
+            ;;
+    esac
+
+    fresh=unknown
+    rank=-1
+    unreadable=no
+    any_frozen=no
+    worst_address=""
+    worst_pending=0
+    for pair in $eps; do
+        address=${pair%%:*}
+        index=${pair#*:}
+        ring=$slot/ep$index
+        deq=""
+        enq=""
+        read -r deq <"$ring/dequeue" 2>/dev/null
+        read -r enq <"$ring/enqueue" 2>/dev/null
+        case "$deq$enq" in
+            ''|*[!0-9a-fx]*)
+                unreadable=yes
+                continue
+                ;;
+        esac
+        if [ "$deq" = "$enq" ]; then
+            pending=0
+        else
+            pending=$($BB awk -v deq="$deq" -v enq="$enq" "$PENDING_AWK" "$ring/trbs" 2>/dev/null)
+        fi
+        case "$pending" in
+            ''|*[!0-9]*)
+                unreadable=yes
+                continue
+                ;;
+        esac
+
+        eval "quiet=\$quiet_$index frozen=\$frozen_$index grew=\$grew_$index last_deq=\$deq_$index last_enq=\$enq_$index"
+        if [ "$pending" -eq 0 ]; then
+            quiet=0
+            frozen=0
+            grew=0
+        else
+            [ "$tx_rate" -lt "$QUIET_TX_PPS" ] && quiet=$((${quiet:-0} + 1))
+            if [ "$deq" = "$last_deq" ]; then
+                frozen=$((${frozen:-0} + 1))
+                [ "$enq" != "$last_enq" ] && grew=$((${grew:-0} + 1))
+            else
+                frozen=0
+                grew=0
+            fi
+        fi
+        eval "quiet_$index=${quiet:-0} frozen_$index=${frozen:-0} grew_$index=${grew:-0} deq_$index=$deq enq_$index=$enq"
+        [ "${frozen:-0}" -gt 0 ] && any_frozen=yes
+
+        verdict=hold
+        level=1
+        if [ "$pending" -eq 0 ]; then
+            verdict=ok
+            level=0
+        elif [ "$frozen" -ge "$STALL_SECONDS" ] && [ "$grew" -ge "$STALL_GROWTH" ]; then
+            verdict=stall
+            level=3
+        elif [ "$frozen" -eq 2 ] && kernel_reported_stall "$index"; then
+            verdict=stall
+            level=3
+        elif [ "$quiet" -ge "$LAG_SECONDS" ] || [ "$frozen" -ge "$LAG_SECONDS" ]; then
+            verdict=lag
+            level=2
+        fi
+        if [ "$level" -gt "$rank" ]; then
+            rank=$level
+            fresh=$verdict
+            worst_address=$address
+            worst_pending=$pending
+        fi
+    done
+    # An endpoint we could not read hides whatever it holds; only a worse
+    # verdict elsewhere outranks that.
+    [ "$unreadable" = yes ] && [ "$rank" -le 0 ] && fresh=unknown
+}
+
+[ -d "$RUN" ] || $BB mkdir -p -m 700 "$RUN"
+if ! $BB grep -q " $DEBUGFS debugfs " /proc/mounts; then
+    if ! $BB mount -t debugfs -o ro,nosuid,nodev,noexec debugfs "$DEBUGFS" 2>/tmp/usb-tx-watcher.err; then
+        log_console "cannot mount debugfs: $($BB cat /tmp/usb-tx-watcher.err 2>/dev/null)"
+        $BB sleep 300
+        exit 1
+    fi
+fi
+
+state=""
+written=""
+watched=""
+since=$(uptime_s)
+tx_last=""
+kmsg_seen=0
+ok_since=""
+dev=""
+intf=""
+driver=""
+log_console "started; sampling every ${INTERVAL_SECONDS}s"
+
+while true; do
+    $BB sleep "$INTERVAL_SECONDS"
+    # usb-recover is unbinding or deauthorizing the device; its debugfs entries
+    # are going away.
+    [ -d "$RECOVER_LOCK" ] && continue
+
+    if ! find_device; then
+        if [ "$state" != none ]; then
+            state=none
+            since=$(uptime_s)
+            dev=""
+            intf=""
+            driver=""
+            watched=""
+            write_state none "" ""
+            note_history none "" "" ""
+        fi
+        continue
+    fi
+    if [ -z "$slot" ] || [ -z "$eps" ]; then
+        if [ "$watched" != "unknown $dev" ]; then
+            watched="unknown $dev"
+            log_console "no xHCI debugfs ring or bulk OUT endpoint for $dev; not watching"
+            state=unknown
+            since=$(uptime_s)
+            write_state unknown "" ""
+            note_history unknown "" "" ""
+        fi
+        continue
+    fi
+    if [ "$watched" != "$dev $slot$eps" ]; then
+        watched="$dev $slot$eps"
+        log_console "watching $dev ($driver, $intf) at ${slot#"$DEBUGFS"/}:$eps"
+        reset_counters
+        tx_last=""
+    fi
+
+    sample
+    case "$fresh" in
+        hold)
+            current=$state
+            # Transfers complete again but some stay behind: a lag, no longer a stall.
+            [ "$state" = stall ] && [ "$any_frozen" = no ] && current=lag
+            ;;
+        *) current=$fresh ;;
+    esac
+    [ -n "$current" ] || current=ok
+
+    if [ "$current" != "$state" ]; then
+        if [ "$current" = ok ] && { [ "$state" = lag ] || [ "$state" = stall ]; }; then
+            log_console "$dev back to normal after $(($(uptime_s) - since))s"
+        elif [ "$current" = lag ] || [ "$current" = stall ]; then
+            log_console "$dev $current: ep $worst_address has $worst_pending TRBs pending, $tx_rate tx/s"
+        elif [ "$current" = unknown ]; then
+            log_console "cannot read the xHCI rings of $dev"
+        fi
+        state=$current
+        since=$(uptime_s)
+        note_history "$state" "$worst_address" "$worst_pending" "$tx_rate"
+    fi
+    write_state "$state" "$worst_address" "$worst_pending"
+
+    if [ "$fresh" = lag ] || [ "$fresh" = stall ]; then
+        ok_since=""
+        if [ ! -d "$RECOVER_LOCK" ] && [ "$(recover_state)" != failed ]; then
+            log_console "starting usb-recover ($fresh on ep $worst_address)"
+            usb-recover "$fresh" "ep $worst_address pending $worst_pending" </dev/null >/dev/null 2>&1 &
+            reset_counters
+            # Give usb-recover time to take its lock before the next sample.
+            $BB sleep 2
+        fi
+    elif [ "$state" = ok ]; then
+        [ -n "$ok_since" ] || ok_since=$(uptime_s)
+        if [ $(($(uptime_s) - ok_since)) -ge "$FAILED_CLEAR_SECONDS" ] && [ "$(recover_state)" = failed ]; then
+            log_console "$dev healthy for ${FAILED_CLEAR_SECONDS}s; clearing usb-recover's failed state"
+            echo "state=idle" >"$RECOVER_STATE.tmp" && $BB mv "$RECOVER_STATE.tmp" "$RECOVER_STATE"
+        fi
+    else
+        ok_since=""
+    fi
+done

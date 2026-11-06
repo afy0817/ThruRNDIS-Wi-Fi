@@ -23,6 +23,11 @@ final class AppModel: ObservableObject {
     /// The Mac interface holding 192.168.100.2 (ThruRNDIS's Bond) while up.
     @Published private(set) var hostLinkInterface: String?
     @Published private(set) var savedNetworks: [CredentialStore.Entry] = []
+    /// Set from asking the VM to restart until a new VM boot answers.
+    @Published private(set) var restartingSince: Date?
+    /// Outcome of the dongle recovery the user should know about; not `lastError`,
+    /// which belongs to the user's own actions.
+    @Published private(set) var dongleNotice: String?
     @Published var lastError: String?
 
     @Published var routingMode: RoutingMode {
@@ -44,6 +49,19 @@ final class AppModel: ObservableObject {
     private var autoConnectArmed = true
     private var userDisconnected = false
     private var lastBootID: String?
+    /// The boot a restart was requested for, so one stuck VM is restarted once.
+    private var restartedBootID: String?
+    private var relaunchedForRestart = false
+
+    /// Automatic VM restarts: at most one per 30 minutes and four per day.
+    private static let restartSpacing: TimeInterval = 30 * 60
+    private static let restartsPerDay = 4
+    /// ThruRNDIS 0.4.1 tries USB Auto Connect while it is still tearing the old VM
+    /// down and ignores it ("attachment is not currently available"); a new VM
+    /// answers within seconds otherwise. Past this, relaunch ThruRNDIS, which
+    /// auto-connects the dongle at startup (no quit prompt with nothing attached).
+    private static let relaunchAfter: TimeInterval = 15
+    private static let restartTimeout: TimeInterval = 120
 
     init() {
         LegacyVmWifi.migrateDefaults()
@@ -114,6 +132,20 @@ final class AppModel: ObservableObject {
         hostLinkUp = hostLink != nil
         let daemon = RouteHelper.daemonStatus()
         if daemon != daemonStatus { daemonStatus = daemon }
+        if let since = restartingSince, Date().timeIntervalSince(since) > Self.restartTimeout {
+            restartingSince = nil
+            dongleNotice = "VM 이 다시 켜지지 않았습니다. ThruRNDIS 에서 USB Wi-Fi 동글을 VM 에 연결하세요."
+        }
+        if let since = restartingSince, status == nil, !relaunchedForRestart,
+           Date().timeIntervalSince(since) > Self.relaunchAfter {
+            relaunchedForRestart = true
+            do {
+                try await ThruRNDISBridge.quit()
+                try await ThruRNDISBridge.launch()
+            } catch {
+                dongleNotice = "ThruRNDIS 를 다시 시작하지 못했습니다: \(error.localizedDescription)"
+            }
+        }
 
         guard applied, thrurndisRunning, let host = ThruRNDISBridge.guestAddress() else {
             guestLost()
@@ -123,7 +155,11 @@ final class AppModel: ObservableObject {
         do {
             let fresh = try await GuestAPI(host: host, token: token).status()
             if fresh != status { status = fresh }
+            if restartingSince != nil, let boot = fresh.boot_id, boot != restartedBootID {
+                restartingSince = nil
+            }
             await autoConnectIfNeeded(fresh)
+            await restartGuestIfNeeded(fresh)
         } catch {
             guestLost()
         }
@@ -151,6 +187,52 @@ final class AppModel: ObservableObject {
               let entry = savedNetworks.first,
               let credential = CredentialStore.credential(for: entry.ssid) else { return }
         try? await api?.connect(credential)
+    }
+
+    /// The VM resets a dongle whose USB transfers get stuck; when that stops
+    /// helping it reports "failed" and only a fresh VM is left. Restarts are
+    /// capped so a dongle that keeps failing does not take the VM down all day.
+    private func restartGuestIfNeeded(_ status: GuestAPI.Status) async {
+        guard status.needsVMRestart else {
+            if dongleNotice != nil, restartingSince == nil, !status.hasUSBTXProblem { dongleNotice = nil }
+            return
+        }
+        guard restartingSince == nil, let boot = status.boot_id, boot != restartedBootID else { return }
+        let now = Date()
+        let recent = Self.restartLog().filter { now.timeIntervalSince($0) < 24 * 60 * 60 }
+        if recent.count >= Self.restartsPerDay
+            || recent.contains(where: { now.timeIntervalSince($0) < Self.restartSpacing }) {
+            let notice = "동글을 다시 붙여도 송신이 풀리지 않습니다. 자동 재시작 횟수를 넘어 VM 을 직접 재시작해야 합니다."
+            if dongleNotice != notice { dongleNotice = notice }
+            return
+        }
+        await requestRestart()
+    }
+
+    /// Asks the VM to power off; ThruRNDIS boots a new one once the dongle is
+    /// free again (USB Auto Connect on), otherwise it asks the user to connect.
+    func restartVM() async {
+        await requestRestart()
+    }
+
+    private func requestRestart() async {
+        guard let api, let boot = status?.boot_id else { return }
+        restartedBootID = boot
+        relaunchedForRestart = false
+        let now = Date()
+        let log = Self.restartLog().filter { now.timeIntervalSince($0) < 24 * 60 * 60 } + [now]
+        UserDefaults.standard.set(log.map(\.timeIntervalSince1970), forKey: "VMRestartLog")
+        do {
+            try await api.restart()
+            restartingSince = now
+            dongleNotice = nil
+        } catch {
+            dongleNotice = "VM 재시작 요청이 실패했습니다: \(error.localizedDescription)"
+        }
+    }
+
+    private static func restartLog() -> [Date] {
+        (UserDefaults.standard.array(forKey: "VMRestartLog") as? [Double] ?? []).map(Date.init(timeIntervalSince1970:))
     }
 
     /// The guest keeps ThruRNDIS's host link up across Wi-Fi drops, so

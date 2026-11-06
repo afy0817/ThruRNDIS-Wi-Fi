@@ -100,7 +100,7 @@ UPSTREAM_SCRIPTS = [
 ]
 THRURNDIS_WIFI_SCRIPTS = [
     "uplink-watcher", "init-wifi", "thrurndis-wifi-config", "wlan-supervisor",
-    "wpa-action", "wlan0-dhcp", "thrurndis-wifi-httpd",
+    "wpa-action", "wlan0-dhcp", "thrurndis-wifi-httpd", "usb-tx-watcher", "usb-recover",
 ]
 
 INITTAB = """::sysinit:/etc/init.d/rcS
@@ -110,6 +110,7 @@ INITTAB = """::sysinit:/etc/init.d/rcS
 ::respawn:/sbin/syslogd -n -O /run/thrurndis-wifi/messages -s 256 -b 1
 ::respawn:/usr/local/sbin/uplink-watcher
 ::respawn:/usr/local/sbin/wlan-supervisor
+::respawn:/usr/local/sbin/usb-tx-watcher
 ::respawn:/usr/local/sbin/thrurndis-wifi-httpd
 hvc0::respawn:/usr/local/sbin/init-console
 ::restart:/sbin/init

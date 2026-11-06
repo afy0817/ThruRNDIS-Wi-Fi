@@ -37,12 +37,22 @@ struct GuestAPI {
         var usb_unsupported: String?
         /// Changes on every VM boot.
         var boot_id: String?
+        /// TRBs waiting on the dongle's stuck bulk OUT endpoint; 0 while transfers complete,
+        /// nil when the VM does not watch (older image, no dongle).
+        var usb_tx_lag: Int?
+        /// The endpoint stopped completing transfers altogether.
+        var usb_tx_stall: Bool?
+        /// "l1" / "l2" while the VM resets the dongle, "failed" when only a VM restart is left.
+        var usb_recover: String?
 
         var ssid: String { Hex.decodeSSID(ssid_hex) }
         var configuredSSID: String { Hex.decodeSSID(configured_ssid_hex) }
         var isAssociated: Bool { wpa_state == "COMPLETED" }
         var isStatic: Bool { ip_source == "static" }
         var hasIPConflict: Bool { ip_error == "conflict" }
+        var isResettingDongle: Bool { usb_recover == "l1" || usb_recover == "l2" }
+        var needsVMRestart: Bool { usb_recover == "failed" }
+        var hasUSBTXProblem: Bool { (usb_tx_lag ?? 0) > 0 || usb_tx_stall == true }
 
         /// Network address of the wlan0 lease, e.g. "10.0.0.0/24".
         var subnetCIDR: String? {
@@ -124,5 +134,14 @@ struct GuestAPI {
         let (data, _) = try await Self.session.data(from: url("disconnect"))
         let reply = try JSONDecoder().decode(SimpleReply.self, from: data)
         guard reply.ok else { throw APIError.server(reply.error ?? "disconnect") }
+    }
+
+    /// Powers the VM off; ThruRNDIS boots a fresh one when the dongle is free again.
+    func restart() async throws {
+        var request = URLRequest(url: url("restart"))
+        request.httpMethod = "POST"
+        let (data, _) = try await Self.session.data(for: request)
+        let reply = try JSONDecoder().decode(SimpleReply.self, from: data)
+        guard reply.ok else { throw APIError.server(reply.error ?? "restart") }
     }
 }

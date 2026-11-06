@@ -34,9 +34,21 @@ pid_alive() {
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
+# wpa_supplicant and wpa_cli delete their pidfile and control socket on exit,
+# so the next instance may only start once the old one is gone.
 stop_pidfile() {
     pid=$($BB cat "$1" 2>/dev/null || true)
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    if [ -n "$pid" ] && kill "$pid" 2>/dev/null; then
+        tries=0
+        while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 50 ]; do
+            $BB sleep 0.1
+            tries=$((tries + 1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            log_console "pid $pid from $1 still running 5s after SIGTERM; killing it"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    fi
     rm -f "$1"
 }
 
@@ -81,19 +93,28 @@ stop_wifi() {
 }
 
 present=""
+ifindex=""
 log_console "started; watching $WLAN_IFACE every ${INTERVAL_SECONDS}s"
 
 while true; do
     if [ -e "/sys/class/net/$WLAN_IFACE" ]; then
+        index=$($BB cat "/sys/class/net/$WLAN_IFACE/ifindex" 2>/dev/null || true)
         if [ "$present" != yes ]; then
             log_console "$WLAN_IFACE appeared"
             present=yes
+        elif [ -n "$index" ] && [ "$index" != "$ifindex" ]; then
+            # usb-recover rebinding the driver can replace wlan0 between two
+            # polls; wpa_supplicant would stay bound to the old interface.
+            log_console "$WLAN_IFACE was replaced (ifindex $ifindex -> $index); restarting Wi-Fi services"
+            stop_wifi
         fi
+        ifindex=$index
         start_wifi || true
     elif [ "$present" = yes ]; then
         log_console "$WLAN_IFACE disappeared; stopping Wi-Fi services"
         stop_wifi
         present=no
+        ifindex=""
     fi
     $BB sleep "$INTERVAL_SECONDS"
 done

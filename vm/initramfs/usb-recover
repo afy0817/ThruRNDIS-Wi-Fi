@@ -1,0 +1,264 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: 2026 GodSeon
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Resets the Wi-Fi dongle from inside the VM when its bulk OUT transfers are
+# stuck. usb-tx-watcher starts it; from the VM console:
+#   usb-recover manual
+# Level 1 unbinds and rebinds the USB driver (a clean reset, ~15 s offline).
+# Level 2 deauthorizes and reauthorizes the device. When both have been used
+# up recently it records "failed" and leaves the next step, restarting the VM,
+# to the macOS app (control API action=restart).
+
+BB=/usr/bin/busybox
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+export PATH
+
+WLAN_IFACE=${THRURNDIS_WIFI_WLAN_IFACE:-wlan0}
+RUN=/run/thrurndis-wifi
+STATE=$RUN/usb-recover
+HISTORY=$RUN/usb-recover.history
+LOCK=$RUN/usb-recover.lock
+WATCH_STATE=$RUN/usb-tx
+WRITE_TIMEOUT_SECONDS=30
+GONE_TIMEOUT_SECONDS=10
+BACK_TIMEOUT_SECONDS=20
+LINK_TIMEOUT_SECONDS=60
+L1_HOLD_SECONDS=600
+L2_HOLD_SECONDS=1800
+MAX_PER_HOUR=3
+
+reason=${1:-manual}
+case "$reason" in
+    manual|lag|stall) ;;
+    *) reason=unknown ;;
+esac
+detail=$(printf '%s' "${2:-}" | $BB tr -cd '0-9A-Za-z_ .:-')
+
+log() {
+    echo "thrurndis-wifi-usb-recover: $*" >/dev/kmsg 2>/dev/null || true
+}
+
+log_console() {
+    log "$*"
+    if [ -c /dev/console ]; then
+        echo "thrurndis-wifi-usb-recover: $*" >/dev/console 2>/dev/null || true
+    else
+        echo "thrurndis-wifi-usb-recover: $*" 2>/dev/null || true
+    fi
+}
+
+uptime_s() {
+    read -r up _ </proc/uptime
+    echo "${up%.*}"
+}
+
+set_state() {
+    {
+        echo "state=$1"
+        echo "reason=$reason"
+        echo "step=$2"
+        echo "at=$(uptime_s)"
+    } >"$STATE.tmp" && $BB mv "$STATE.tmp" "$STATE"
+}
+
+record() {
+    echo "$(uptime_s) $1 $2 $reason" >>"$HISTORY"
+}
+
+# L1, L2, or "none <why>" from what this VM session already tried.
+choose_level() {
+    if [ "$reason" = manual ]; then
+        echo L1
+        return
+    fi
+    [ -f "$HISTORY" ] || { echo L1; return; }
+    $BB awk -v now="$(uptime_s)" -v max="$MAX_PER_HOUR" -v l1_hold="$L1_HOLD_SECONDS" \
+        -v l2_hold="$L2_HOLD_SECONDS" '
+        $1 + 0 > now - 3600 { recent++ }
+        $2 == "L1" && $3 == "ok" { l1 = $1 }
+        $2 == "L2" && $3 == "ok" { l2 = $1 }
+        END {
+            if (recent >= max) { print "none " recent " resets in the last hour"; exit }
+            if (l2 != "" && now - l2 < l2_hold) { print "none level 2 did not hold"; exit }
+            if (l1 != "" && now - l1 < l1_hold) { print "L2"; exit }
+            print "L1"
+        }' "$HISTORY"
+}
+
+# Sets dev (1-1), intf (1-1:1.0) and driver (rtw88_8822bu). After a failed
+# bind wlan0 is gone, so fall back to what usb-tx-watcher last saw. Every
+# value ends up in a sysfs path, so check its shape.
+find_names() {
+    intf_path=$($BB readlink -f "/sys/class/net/$WLAN_IFACE/device" 2>/dev/null)
+    if [ -n "$intf_path" ] && [ -d "$intf_path" ]; then
+        intf=${intf_path##*/}
+        dev_path=${intf_path%/*}
+        dev=${dev_path##*/}
+        driver=$($BB readlink "$intf_path/driver" 2>/dev/null)
+        driver=${driver##*/}
+    else
+        dev=$($BB awk -F '=' '$1 == "dev" { print $2 }' "$WATCH_STATE" 2>/dev/null)
+        intf=$($BB awk -F '=' '$1 == "intf" { print $2 }' "$WATCH_STATE" 2>/dev/null)
+        driver=$($BB awk -F '=' '$1 == "driver" { print $2 }' "$WATCH_STATE" 2>/dev/null)
+    fi
+    case "$dev" in
+        ''|*[!0-9.-]*) return 1 ;;
+    esac
+    case "$intf" in
+        "$dev":*) ;;
+        *) return 1 ;;
+    esac
+    case "${intf#"$dev":}" in
+        ''|*[!0-9.]*) return 1 ;;
+    esac
+    case "$driver" in
+        ''|*[!a-z0-9_]*) return 1 ;;
+    esac
+    return 0
+}
+
+# A write that drives xHCI commands can block in the kernel, where no signal
+# reaches it; poll it instead of waiting. 0 ok, 1 error, 2 stuck.
+write_sysfs() {
+    path=$1
+    value=$2
+    ( echo "$value" >"$path" ) 2>/tmp/usb-recover.err &
+    writer=$!
+    waited=0
+    while kill -0 "$writer" 2>/dev/null; do
+        if [ "$waited" -ge "$WRITE_TIMEOUT_SECONDS" ]; then
+            log_console "writing $value to $path still running after ${WRITE_TIMEOUT_SECONDS}s; the kernel is stuck"
+            return 2
+        fi
+        $BB sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$writer"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log_console "writing $value to $path failed: $($BB cat /tmp/usb-recover.err 2>/dev/null)"
+        return 1
+    fi
+    return 0
+}
+
+wlan_gone() {
+    [ ! -e "/sys/class/net/$WLAN_IFACE" ]
+}
+
+wlan_back() {
+    [ -e "/sys/class/net/$WLAN_IFACE" ]
+}
+
+# wait_for <seconds> <test>
+wait_for() {
+    limit=$1
+    shift
+    waited=0
+    until "$@"; do
+        [ "$waited" -ge "$limit" ] && return 1
+        $BB sleep 1
+        waited=$((waited + 1))
+    done
+    return 0
+}
+
+level1() {
+    set_state l1 "unbinding $intf"
+    write_sysfs "/sys/bus/usb/drivers/$driver/unbind" "$intf" || return $?
+    wait_for "$GONE_TIMEOUT_SECONDS" wlan_gone ||
+        log_console "$WLAN_IFACE still present ${GONE_TIMEOUT_SECONDS}s after unbind; binding anyway"
+    set_state l1 "binding $intf"
+    write_sysfs "/sys/bus/usb/drivers/$driver/bind" "$intf" || return $?
+    if ! wait_for "$BACK_TIMEOUT_SECONDS" wlan_back; then
+        log_console "$WLAN_IFACE did not come back within ${BACK_TIMEOUT_SECONDS}s of the bind"
+        return 1
+    fi
+    return 0
+}
+
+level2() {
+    set_state l2 "deauthorizing $dev"
+    write_sysfs "/sys/bus/usb/devices/$dev/authorized" 0 || return $?
+    wait_for "$GONE_TIMEOUT_SECONDS" wlan_gone ||
+        log_console "$WLAN_IFACE still present ${GONE_TIMEOUT_SECONDS}s after deauthorizing; authorizing anyway"
+    set_state l2 "authorizing $dev"
+    write_sysfs "/sys/bus/usb/devices/$dev/authorized" 1 || return $?
+    if ! wait_for "$BACK_TIMEOUT_SECONDS" wlan_back; then
+        log_console "$WLAN_IFACE did not come back within ${BACK_TIMEOUT_SECONDS}s of authorizing"
+        return 1
+    fi
+    return 0
+}
+
+link_up() {
+    [ "$($BB cat "/sys/class/net/$WLAN_IFACE/carrier" 2>/dev/null)" = 1 ] &&
+        ip -4 addr show dev "$WLAN_IFACE" scope global 2>/dev/null | $BB grep -q inet
+}
+
+# The reset worked once wlan0 is back. Rejoining the network is wpa-action's
+# job; its outcome depends on the access point, so it is only logged here.
+finish_ok() {
+    record "$1" ok
+    set_state idle "$1 done"
+    log_console "$1 done: $WLAN_IFACE back $(($(uptime_s) - started))s after the reset started"
+    if [ -s "$RUN/network" ]; then
+        if wait_for "$LINK_TIMEOUT_SECONDS" link_up; then
+            log_console "$WLAN_IFACE has its address again $(($(uptime_s) - started))s after the reset started"
+        else
+            log_console "$WLAN_IFACE has no address ${LINK_TIMEOUT_SECONDS}s after the reset"
+        fi
+    fi
+}
+
+fail_out() {
+    set_state failed "$1"
+    log_console "$1; the app has to restart the VM"
+}
+
+[ -d "$RUN" ] || $BB mkdir -p -m 700 "$RUN"
+$BB mkdir "$LOCK" 2>/dev/null || {
+    log_console "already running"
+    exit 0
+}
+trap '$BB rmdir "$LOCK" 2>/dev/null' EXIT
+
+started=$(uptime_s)
+level=$(choose_level)
+case "$level" in
+    none*)
+        fail_out "$reason${detail:+ ($detail)}: no VM-side reset left (${level#none })"
+        exit 0
+        ;;
+esac
+if ! find_names; then
+    fail_out "$reason: cannot tell which USB device wlan0 is"
+    exit 1
+fi
+log_console "$reason${detail:+ ($detail)}: level ${level#L} reset of $dev ($driver $intf)"
+
+if [ "$level" = L1 ]; then
+    level1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        finish_ok L1
+        exit 0
+    fi
+    record L1 failed
+    if [ "$rc" -eq 2 ]; then
+        fail_out "level 1 reset hung in the kernel"
+        exit 1
+    fi
+    log_console "level 1 reset failed; trying level 2"
+fi
+
+level2
+rc=$?
+if [ "$rc" -eq 0 ]; then
+    finish_ok L2
+    exit 0
+fi
+record L2 failed
+fail_out "level 2 reset failed"
+exit 1
