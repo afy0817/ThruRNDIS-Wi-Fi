@@ -11,8 +11,9 @@ struct ThruRNDISWiFiApp: App {
 
     var body: some Scene {
         // The menu is an NSPopover owned by StatusItemController; an App
-        // still needs a scene.
-        Settings { EmptyView() }
+        // still needs a scene. A hidden MenuBarExtra has no window to open,
+        // whereas an empty Settings scene came up as a blank window at launch.
+        MenuBarExtra("ThruRNDIS-Wi-Fi", isInserted: .constant(false)) { EmptyView() }
     }
 }
 
