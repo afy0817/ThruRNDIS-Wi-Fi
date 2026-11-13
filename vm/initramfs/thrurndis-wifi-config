@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: 2026 GodSeon
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
-# Sole writer of /run/thrurndis-wifi/wpa_supplicant.conf and /run/thrurndis-wifi/static.
+# Sole writer of /run/thrurndis-wifi/wpa_supplicant.conf, /run/thrurndis-wifi/static
+# and /run/thrurndis-wifi/network.
 #   thrurndis-wifi-config write <ssid-hex> <psk-hex|""> <sae-hex|""> <hidden 0|1> \
 #       [<ipv4-hex> <prefix> <gateway-hex|""> <dns-hex|""> <routes-hex|"">]
 #   thrurndis-wifi-config clear
@@ -218,7 +219,7 @@ case "${1:-}" in
         cmd_apply
         ;;
     *)
-        echo "usage: $0 {write <ssid-hex> <psk-hex> <sae-hex> <hidden> [<ipv4-hex> <prefix> <gateway-hex> <dns-hex>]|clear|apply}" >&2
+        echo "usage: $0 {write <ssid-hex> <psk-hex> <sae-hex> <hidden> [<ipv4-hex> <prefix> <gateway-hex> <dns-hex> <routes-hex>]|clear|apply}" >&2
         exit 2
         ;;
 esac

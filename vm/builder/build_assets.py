@@ -5,11 +5,11 @@
 
 The layout follows ThruRNDIS_VM_Assets (BusyBox init, RAM-only root, same
 guest scripts and console markers) and adds the USB Wi-Fi stack: cfg80211,
-mac80211, rtw89 USB drivers with their firmware, wireless-regdb,
-wpa_supplicant and a busybox httpd control API.
+mac80211, the USB Wi-Fi drivers listed in drivers.conf with their firmware,
+wireless-regdb, wpa_supplicant and a busybox httpd control API.
 
-Run through vm/build.sh; it expects linux-stable, linux-firmware-rtw89,
-wireless-regdb and kmod to be installed in the container already.
+Run through vm/build.sh; it expects linux-stable, wireless-regdb, kmod and the
+firmware packages named in drivers.conf to be installed in the container already.
 """
 
 import argparse
