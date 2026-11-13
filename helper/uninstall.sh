@@ -16,9 +16,12 @@ launchctl bootout system "$PLIST" 2>/dev/null || true
 if [ -f "$RANK_PID" ]; then
     read -r pid held <"$RANK_PID" && kill "$pid" 2>/dev/null
 fi
+# macOS deletes by destination, so only routes still pointing at the guest
+# are removed; a same-prefix route of the user's stays.
 if [ -f "$STATE" ]; then
     for cidr in $(cat "$STATE"); do
-        route -n delete -net "$cidr" 192.168.100.1 >/dev/null 2>&1 || true
+        route -n get -net "$cidr" 2>/dev/null | grep -q 'gateway: 192.168.100.1$' &&
+            route -n delete -net "$cidr" 192.168.100.1 >/dev/null 2>&1
     done
 fi
 rm -f "$PLIST" "$BIN" "$RANK_BIN" "$STATE" "$RANK_PID" /var/run/thrurndis-wifi-routed.status \
@@ -32,7 +35,8 @@ if [ -f "$LEGACY_PLIST" ]; then
         read -r pid held </var/run/vmwifi-rank.pid && kill "$pid" 2>/dev/null
     fi
     for cidr in $(cat /var/run/vmwifi-routed.state 2>/dev/null); do
-        route -n delete -net "$cidr" 192.168.100.1 >/dev/null 2>&1 || true
+        route -n get -net "$cidr" 2>/dev/null | grep -q 'gateway: 192.168.100.1$' &&
+            route -n delete -net "$cidr" 192.168.100.1 >/dev/null 2>&1
     done
     rm -f "$LEGACY_PLIST" /usr/local/libexec/vmwifi-routed /usr/local/libexec/vmwifi-rank \
         /var/run/vmwifi-routed.state /var/run/vmwifi-routed.status /var/run/vmwifi-rank.pid \

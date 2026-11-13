@@ -26,14 +26,16 @@ install -o root -g wheel -m 755 "$SOURCE" "$BIN"
 install -o root -g wheel -m 755 "$RANK_SOURCE" "$RANK_BIN"
 
 # The helper used to be installed as VmWifi's: take it down and hand its
-# never-primary holder (it outlives its daemon) to the new daemon.
+# never-primary holder (it outlives its daemon) and its route list to the new
+# daemon, which removes the routes no longer wanted.
 LEGACY_PLIST=/Library/LaunchDaemons/io.github.afy0817.vmwifi.routed.plist
 if [ -f "$LEGACY_PLIST" ]; then
     launchctl bootout system "$LEGACY_PLIST" 2>/dev/null || true
     [ -f /var/run/vmwifi-rank.pid ] && mv -f /var/run/vmwifi-rank.pid /var/run/thrurndis-wifi-rank.pid
     [ -f /var/db/vmwifi-routed.bond ] && mv -f /var/db/vmwifi-routed.bond /var/db/thrurndis-wifi-routed.bond
+    [ -f /var/run/vmwifi-routed.state ] && mv -f /var/run/vmwifi-routed.state /var/run/thrurndis-wifi-routed.state
     rm -f "$LEGACY_PLIST" /usr/local/libexec/vmwifi-routed /usr/local/libexec/vmwifi-rank \
-        /var/run/vmwifi-routed.state /var/run/vmwifi-routed.status
+        /var/run/vmwifi-routed.status
 fi
 
 # The never-primary holder (thrurndis-wifi-rank) is left running across the

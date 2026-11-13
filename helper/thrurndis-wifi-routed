@@ -149,10 +149,11 @@ write_status() {
 }
 
 log "started with $CONFIG"
-: >"$STATE"
+# $STATE is kept from the previous instance, so routes it added that are no
+# longer wanted are removed on the first pass.
 rank_failed=""
 link_was_up=""
-# A holder left by a previous instance (or started by install.sh) is adopted
+# A holder left by a previous instance (or by VmWifi's daemon) is adopted
 # by hold_rank, so the Bond never becomes primary while the daemon restarts.
 
 while true; do
