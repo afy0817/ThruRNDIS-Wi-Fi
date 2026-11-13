@@ -59,7 +59,8 @@ struct WiFiCredential: Codable, Equatable {
     }
 
     private var isRawPSK: Bool {
-        password.count == 64 && password.allSatisfy(\.isHexDigit)
+        // isHexDigit alone also takes fullwidth digits, which the VM rejects.
+        password.count == 64 && password.allSatisfy { $0.isASCII && $0.isHexDigit }
     }
 
     /// WPA2 PSK = PBKDF2-HMAC-SHA1(passphrase, ssid, 4096, 32).

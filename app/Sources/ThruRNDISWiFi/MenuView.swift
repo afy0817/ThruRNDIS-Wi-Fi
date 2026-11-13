@@ -14,7 +14,7 @@ struct MenuView: View {
             setupSection
             if model.assetsOutdated {
                 notice("앱에 새 VM 이미지가 들어 있습니다.",
-                       detail: "업데이트하면 ThruRNDIS 가 재시작되고 동글 연결이 잠시 끊겼다가 다시 붙습니다.")
+                       detail: "업데이트하면 ThruRNDIS 가 재시작되고 동글 연결이 잠시 끊겼다가 다시 붙습니다. ThruRNDIS 가 종료를 물으면 'ThruRNDIS 종료' 를 누르세요.")
                 Button("VM 이미지 업데이트") { Task { await model.applyToThruRNDIS() } }
                     .disabled(model.busy != nil)
             }
@@ -73,6 +73,11 @@ struct MenuView: View {
         } else if model.status == nil {
             notice("VM 이 아직 실행되지 않았습니다.",
                    detail: "메뉴 막대의 '가상 머신 액세서리' 에서 USB Wi-Fi 동글을 ThruRNDIS 로 넘기세요.")
+        } else if model.status?.needsVMRestart == true, model.restartingSince == nil {
+            // Shown here rather than with the connection: a dongle that stopped
+            // sending has often dropped the network or vanished from the VM.
+            notice("VM 안에서 동글을 다시 붙여도 송신이 풀리지 않습니다.", detail: nil)
+            Button("VM 재시작") { Task { await model.restartVM() } }
         } else if model.status?.isResettingDongle == true {
             notice("동글을 다시 붙이는 중…",
                    detail: "USB 송신이 밀려 VM 안에서 동글을 재설정합니다. 15초쯤 끊겼다가 다시 연결됩니다.")
@@ -98,14 +103,6 @@ struct MenuView: View {
                 Text(addressLine(status)).font(.caption).foregroundStyle(.secondary)
                 if let text = usbTXText(status) {
                     Text(text).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                }
-                if status.needsVMRestart, model.restartingSince == nil {
-                    HStack {
-                        Text("VM 안에서 동글을 다시 붙여도 송신이 풀리지 않습니다.")
-                            .font(.caption).fixedSize(horizontal: false, vertical: true)
-                        Spacer()
-                        Button("VM 재시작") { Task { await model.restartVM() } }.controlSize(.small)
-                    }
                 }
                 if status.hasIPConflict {
                     HStack(alignment: .top) {

@@ -46,7 +46,8 @@ final class AppModel: ObservableObject {
     let token: String
     let country: String
     private var pollTask: Task<Void, Never>?
-    private var autoConnectArmed = true
+    /// Auto-connect tries left in this VM session; a failed try is repeated on the next poll.
+    private var autoConnectTriesLeft = AppModel.autoConnectTries
     private var userDisconnected = false
     private var lastBootID: String?
     /// The boot a restart was requested for, so one stuck VM is restarted once.
@@ -62,6 +63,7 @@ final class AppModel: ObservableObject {
     /// auto-connects the dongle at startup (no quit prompt with nothing attached).
     private static let relaunchAfter: TimeInterval = 15
     private static let restartTimeout: TimeInterval = 120
+    private static let autoConnectTries = 3
 
     init() {
         LegacyVmWifi.migrateDefaults()
@@ -118,18 +120,18 @@ final class AppModel: ObservableObject {
     }
 
     func refresh() async {
-        thrurndisInstalled = ThruRNDISBridge.isInstalled
-        thrurndisRunning = ThruRNDISBridge.isRunning
-        applied = ThruRNDISBridge.isApplied(token: token)
-        assetsOutdated = applied && ThruRNDISBridge.bundledAssetsDiffer
+        update(\.thrurndisInstalled, ThruRNDISBridge.isInstalled)
+        update(\.thrurndisRunning, ThruRNDISBridge.isRunning)
+        update(\.applied, ThruRNDISBridge.isApplied(token: token))
+        update(\.assetsOutdated, applied && ThruRNDISBridge.bundledAssetsDiffer)
         // A helper installed under the former name counts as installed but
         // outdated, so the menu offers to replace it.
-        helperInstalled = RouteHelper.isInstalled || LegacyVmWifi.helperInstalled
-        helperOutdated = LegacyVmWifi.helperInstalled || (helperInstalled && RouteHelper.isOutdated)
+        update(\.helperInstalled, RouteHelper.isInstalled || LegacyVmWifi.helperInstalled)
+        update(\.helperOutdated, LegacyVmWifi.helperInstalled || (helperInstalled && RouteHelper.isOutdated))
         LegacyVmWifi.removeSupportDirectoryIfUnused(applied: applied)
         let hostLink = RouteHelper.localIPv4Addresses().first { $0.address == "192.168.100.2" }?.interface
         if hostLink != hostLinkInterface { hostLinkInterface = hostLink }
-        hostLinkUp = hostLink != nil
+        update(\.hostLinkUp, hostLink != nil)
         let daemon = RouteHelper.daemonStatus()
         if daemon != daemonStatus { daemonStatus = daemon }
         if let since = restartingSince, Date().timeIntervalSince(since) > Self.restartTimeout {
@@ -151,7 +153,7 @@ final class AppModel: ObservableObject {
             guestLost()
             return
         }
-        guestHost = host
+        update(\.guestHost, host)
         do {
             let fresh = try await GuestAPI(host: host, token: token).status()
             if fresh != status { status = fresh }
@@ -166,10 +168,16 @@ final class AppModel: ObservableObject {
         syncRoutes()
     }
 
+    /// Assigns only a changed value: every assignment to a `@Published` property
+    /// redraws the menu, and `refresh()` runs every 3 seconds.
+    private func update<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<AppModel, Value>, _ value: Value) {
+        if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
+    }
+
     private func guestLost() {
         if status != nil { status = nil }
         if !scanResults.isEmpty { scanResults = [] }
-        autoConnectArmed = true
+        autoConnectTriesLeft = Self.autoConnectTries
     }
 
     /// A freshly booted guest has no network configured; hand it the most
@@ -179,14 +187,24 @@ final class AppModel: ObservableObject {
     private func autoConnectIfNeeded(_ status: GuestAPI.Status) async {
         if let boot = status.boot_id, !boot.isEmpty, boot != lastBootID {
             lastBootID = boot
-            autoConnectArmed = true
+            autoConnectTriesLeft = Self.autoConnectTries
         }
-        guard autoConnectArmed, status.device else { return }
-        autoConnectArmed = false
+        guard autoConnectTriesLeft > 0, status.device else { return }
         guard status.configured_ssid_hex.isEmpty, !userDisconnected,
               let entry = savedNetworks.first,
-              let credential = CredentialStore.credential(for: entry.ssid) else { return }
-        try? await api?.connect(credential)
+              let credential = CredentialStore.credential(for: entry.ssid) else {
+            autoConnectTriesLeft = 0
+            return
+        }
+        do {
+            try await api?.connect(credential)
+            autoConnectTriesLeft = 0
+        } catch {
+            autoConnectTriesLeft -= 1
+            if autoConnectTriesLeft == 0 {
+                lastError = "\(entry.ssid) 에 자동으로 연결하지 못했습니다(\(error.localizedDescription)). 저장된 네트워크에서 직접 연결하세요."
+            }
+        }
     }
 
     /// The VM resets a dongle whose USB transfers get stuck; when that stops

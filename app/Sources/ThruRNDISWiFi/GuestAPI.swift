@@ -71,7 +71,6 @@ struct GuestAPI {
         var id: String { bssid }
         var ssid: String { Hex.decodeSSID(ssid_hex) }
         var isSecured: Bool { flags.contains("WPA") || flags.contains("SAE") || flags.contains("WEP") }
-        var isWPA3Only: Bool { flags.contains("SAE") && !flags.contains("PSK") }
     }
 
     private struct ScanReply: Decodable {

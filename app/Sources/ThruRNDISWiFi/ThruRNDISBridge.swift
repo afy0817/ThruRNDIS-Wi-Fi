@@ -122,10 +122,8 @@ enum ThruRNDISBridge {
         try await launch()
     }
 
-    static var hasBackup: Bool { UserDefaults.standard.dictionary(forKey: backupKey) != nil }
-
     static func restore() async throws {
-        guard let backup = UserDefaults.standard.dictionary(forKey: backupKey) else { return }
+        guard let backup = UserDefaults.standard.dictionary(forKey: backupKey) else { throw BridgeError.noBackup }
         let wasRunning = isRunning
         try await quit()
         for key in managedKeys {
@@ -140,7 +138,9 @@ enum ThruRNDISBridge {
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID as String)
         guard !running.isEmpty else { return }
         running.forEach { $0.terminate() }
-        for _ in 0..<60 {
+        // While a USB device is attached or routing is up, ThruRNDIS asks before
+        // quitting and then spends up to 9 s cleaning up; leave time to answer.
+        for _ in 0..<240 {
             if running.allSatisfy(\.isTerminated) { return }
             try await Task.sleep(for: .milliseconds(250))
         }
@@ -173,10 +173,23 @@ enum ThruRNDISBridge {
     }
 
     private static func guestAddressFromLog() -> String? {
-        let fileManager = FileManager.default
-        guard let names = try? fileManager.contentsOfDirectory(atPath: logsDirectory.path) else { return nil }
-        guard let newest = names.filter({ $0.hasSuffix(".log") }).sorted().last,
-              let text = try? String(contentsOf: logsDirectory.appendingPathComponent(newest), encoding: .utf8)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: logsDirectory.path) else { return nil }
+        // A session logs to <yyyyMMdd-HHmmss>.log, then -2.log, -3.log, ... as it rotates; plain
+        // name order would sort its later files before the first. Older sessions are a past VM.
+        let logs = names.filter { $0.hasSuffix(".log") }.map { name -> (stem: String, sequence: Int, name: String) in
+            let base = name.dropLast(4)
+            let rest = base.dropFirst(15)
+            return (String(base.prefix(15)), rest.hasPrefix("-") ? Int(rest.dropFirst()) ?? 0 : 1, name)
+        }.sorted { ($0.stem, $0.sequence) < ($1.stem, $1.sequence) }
+        guard let session = logs.last?.stem else { return nil }
+        for log in logs.reversed() where log.stem == session {
+            if let address = guestAddress(inLog: log.name) { return address }
+        }
+        return nil
+    }
+
+    private static func guestAddress(inLog name: String) -> String? {
+        guard let text = try? String(contentsOf: logsDirectory.appendingPathComponent(name), encoding: .utf8)
         else { return nil }
         let marker = "Guest VZNAT network discovered: guest="
         guard let line = text.components(separatedBy: "\n").last(where: { $0.contains(marker) }),
@@ -198,12 +211,14 @@ enum ThruRNDISBridge {
     }
 
     enum BridgeError: LocalizedError {
-        case notInstalled, missingBundledAssets, quitTimedOut
+        case notInstalled, missingBundledAssets, quitTimedOut, noBackup
         var errorDescription: String? {
             switch self {
             case .notInstalled: return "ThruRNDIS 가 설치되어 있지 않습니다. (brew install --cask afcoo/tap/thrurndis)"
             case .missingBundledAssets: return "앱에 VM 이미지가 들어 있지 않습니다. build_app.sh 로 다시 빌드하세요."
-            case .quitTimedOut: return "ThruRNDIS 가 종료되지 않았습니다."
+            case .quitTimedOut:
+                return "ThruRNDIS 가 종료되지 않았습니다. ThruRNDIS 가 종료를 물으면 'ThruRNDIS 종료' 를 누른 뒤 다시 시도하세요."
+            case .noBackup: return "되돌릴 원래 설정이 없습니다. ThruRNDIS 설정의 VM 에셋에서 이미지를 직접 고르세요."
             }
         }
     }

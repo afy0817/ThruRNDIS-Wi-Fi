@@ -73,11 +73,6 @@ enum RouteHelper {
         return status
     }
 
-    /// ThruRNDIS's helper owns 192.168.100.2 on its Bond while routing is up.
-    static var hostLinkUp: Bool {
-        localIPv4Addresses().contains { $0.address == "192.168.100.2" }
-    }
-
     /// Every IPv4 address configured on this Mac, with its interface name.
     static func localIPv4Addresses() -> [(interface: String, address: String)] {
         var head: UnsafeMutablePointer<ifaddrs>?
