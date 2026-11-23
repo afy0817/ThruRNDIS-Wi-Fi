@@ -38,6 +38,7 @@ struct MenuView: View {
             }
             Divider()
             footer
+            versionLine
         }
         .padding(14)
         .frame(width: 360)
@@ -464,6 +465,35 @@ struct MenuView: View {
             Button("종료") { NSApplication.shared.terminate(nil) }
         }
         .controlSize(.small)
+    }
+
+    /// The app's version and the VM image it carries; the image ThruRNDIS boots too when that
+    /// one is another (before "VM 이미지 업데이트").
+    private var versionLine: some View {
+        Text(versionText)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .help(versionHelp)
+    }
+
+    private var versionText: String {
+        var text = "버전 \(BuildInfo.appLabel)"
+        if let image = BuildInfo.bundledImage {
+            text += " · VM 이미지 \(image.version)"
+        }
+        if let installed = model.installedImage, installed != BuildInfo.bundledImage {
+            text += " (ThruRNDIS 가 쓰는 이미지 \(installed.version))"
+        }
+        return text
+    }
+
+    private var versionHelp: String {
+        guard let image = BuildInfo.bundledImage else { return "앱에 VM 이미지 정보가 없습니다." }
+        var lines = ["GodseonDongle-VM \(image.version)"]
+        if !image.kernel.isEmpty { lines.append("커널 \(image.kernel)") }
+        if !image.commit.isEmpty { lines.append("커밋 \(image.commit.prefix(7))") }
+        return lines.joined(separator: " · ")
     }
 
     // MARK: Helpers

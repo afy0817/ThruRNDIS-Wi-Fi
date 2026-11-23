@@ -19,7 +19,15 @@ APP_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH='' cd -- "$APP_DIR/.." && pwd)
 DIST=$ROOT/dist
 BUNDLE=$DIST/ThruRNDIS-Wi-Fi.app
-VERSION=${THRURNDIS_WIFI_VERSION:-0.1.0}
+# The version: THRURNDIS_WIFI_VERSION, else the newest v* tag of this checkout (v0.3.0 -> 0.3.0).
+# The commit goes into Info.plist too; the menu shows both (BuildInfo.swift).
+TAG=$(git -C "$ROOT" describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+VERSION=${THRURNDIS_WIFI_VERSION:-${TAG#v}}
+VERSION=${VERSION:-0.0.0}
+COMMIT=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)
+if [ -n "$COMMIT" ] && [ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]; then
+    COMMIT="$COMMIT-dirty"
+fi
 
 # shellcheck source=../vm-assets.env
 . "$ROOT/vm-assets.env"
@@ -80,6 +88,7 @@ cat >"$BUNDLE/Contents/Info.plist" <<EOF
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
+    <key>ThruRNDISWiFiCommit</key><string>$COMMIT</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>NSLocalNetworkUsageDescription</key>
@@ -90,7 +99,7 @@ EOF
 
 codesign --force --sign - --timestamp=none "$BUNDLE"
 codesign --verify --strict "$BUNDLE"
-echo "built $BUNDLE"
+echo "built $BUNDLE ($VERSION, ${COMMIT:-no git})"
 
 if [ "${1:-}" = "--install" ]; then
     pkill -x ThruRNDISWiFi 2>/dev/null || true

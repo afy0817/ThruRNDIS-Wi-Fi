@@ -11,6 +11,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var applied = false
     /// ThruRNDIS boots an older VM image than the one in this app.
     @Published private(set) var assetsOutdated = false
+    /// The VM image ThruRNDIS boots (the copy in Application Support) while applied.
+    @Published private(set) var installedImage: BuildInfo.Image?
     @Published private(set) var guestHost: String?
     @Published private(set) var status: GuestAPI.Status?
     @Published private(set) var scanResults: [GuestAPI.ScanResult] = []
@@ -124,6 +126,9 @@ final class AppModel: ObservableObject {
         update(\.thrurndisRunning, ThruRNDISBridge.isRunning)
         update(\.applied, ThruRNDISBridge.isApplied(token: token))
         update(\.assetsOutdated, applied && ThruRNDISBridge.bundledAssetsDiffer)
+        update(\.installedImage, applied
+            ? BuildInfo.Image(manifest: ThruRNDISBridge.assetsDirectory.appendingPathComponent("manifest.json"))
+            : nil)
         // A helper installed under the former name counts as installed but
         // outdated, so the menu offers to replace it.
         update(\.helperInstalled, RouteHelper.isInstalled || LegacyVmWifi.helperInstalled)
