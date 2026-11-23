@@ -17,7 +17,7 @@
 ![ThruRNDIS-Wi-Fi 구조: 맥의 지정 대역 트래픽은 ThruRNDIS 연결(bond0)을 지나 Linux VM 과 USB Wi-Fi 동글을 거쳐 대상 Wi-Fi 망으로 가고, 나머지는 맥 내장 Wi-Fi 로 인터넷에 갑니다](images/architecture.svg)
 
 - ThruRNDIS 는 휴대폰 USB 테더링(RNDIS)을 맥에서 쓰게 해 주는 앱으로, 작은 Linux VM 에 USB 장치를 넘겨 처리합니다.
-- ThruRNDIS-Wi-Fi 는 그 VM 이미지를 Wi-Fi 드라이버가 든 이미지로 바꾸고, 메뉴 막대에서 VM 의 Wi-Fi 를 조작합니다.
+- ThruRNDIS-Wi-Fi 는 그 VM 이미지를 Wi-Fi 드라이버가 든 이미지([GodseonDongle-VM](https://github.com/afy0817/GodseonDongle-VM), GodseonDongle 과 같이 쓰는 이미지)로 바꾸고, 메뉴 막대에서 VM 의 Wi-Fi 를 조작합니다.
 - 작은 라우팅 도우미(root 데몬)가 지정한 대역만 동글로 보냅니다. ThruRNDIS 연결이 맥의 기본 경로를 가져가지 못하게도 막습니다.
 
 ## 요구 사항
@@ -93,7 +93,7 @@ DHCP 서버가 없는 망은 저장된 네트워크의 **IP** 버튼에서 주�
 
 ## 지원 동글
 
-VM 이미지에 기본으로 들어 있는 드라이버입니다(리눅스 커널 드라이버, [`vm/drivers.conf`](vm/drivers.conf)). 실제 동글로 확인한 것은 RTL8851BU 계열 `0bda:b831` 과 RTL8822BU 계열 `0bda:b812` 이고, 나머지는 드라이버만 들어 있습니다.
+VM 이미지에 기본으로 들어 있는 드라이버입니다(리눅스 커널 드라이버, GodseonDongle-VM 의 [`drivers.conf`](https://github.com/afy0817/GodseonDongle-VM/blob/main/drivers.conf)). 실제 동글로 확인한 것은 RTL8851BU 계열 `0bda:b831` 과 RTL8822BU 계열 `0bda:b812` 이고, 나머지는 드라이버만 들어 있습니다.
 
 | 제조사 | 칩 | 드라이버 |
 |---|---|---|
@@ -108,23 +108,28 @@ VM 이미지에 기본으로 들어 있는 드라이버입니다(리눅스 커�
 
 ### 다른 동글 쓰기 (드라이버 추가)
 
-VM 의 리눅스 커널(Alpine linux-stable)에는 위 표 말고도 USB Wi-Fi 드라이버가 더 있습니다. 대부분 표에 한 줄을 넣고 다시 빌드하면 됩니다. 빌드에는 Docker Desktop 이 필요합니다([직접 빌드](#직접-빌드)).
+VM 의 리눅스 커널(Alpine linux-stable)에는 위 표 말고도 USB Wi-Fi 드라이버가 더 있습니다. VM 이미지는 [GodseonDongle-VM](https://github.com/afy0817/GodseonDongle-VM) 저장소에서 만들므로, 거기서 표에 한 줄을 넣고 다시 빌드한 이미지를 이 앱에 넣습니다. 빌드에는 Docker Desktop 이 필요합니다.
 
 1. 동글의 USB ID(`xxxx:yyyy`)를 확인합니다. 메뉴의 안내 문구나 **시스템 정보 → USB** 에 나옵니다.
-2. 어떤 드라이버가 맡는지 찾습니다.
+2. GodseonDongle-VM 을 이 저장소 옆에 받아 어떤 드라이버가 맡는지 찾습니다(`./build.sh` 를 한 번 돌린 뒤에).
 
    ```sh
-   ./vm/tools/find-driver.sh 0bda:b812
+   git clone https://github.com/afy0817/GodseonDongle-VM.git ../GodseonDongle-VM
+   ../GodseonDongle-VM/tools/find-driver.sh 0bda:b812
    ```
 
-3. [`vm/drivers.conf`](vm/drivers.conf) 에 한 줄 넣습니다. 펌웨어는 드라이버가 밝힌 파일을 빌드가 알아서 넣으므로, 보통은 모듈 이름과 펌웨어 패키지만 적으면 됩니다.
+3. GodseonDongle-VM 의 `drivers.conf` 에 한 줄 넣습니다. 펌웨어는 드라이버가 밝힌 파일을 빌드가 알아서 넣으므로, 보통은 모듈 이름과 펌웨어 패키지만 적으면 됩니다.
 
    ```text
    rtw88_8822bu  pkg=linux-firmware-rtw88
    ```
 
    커널이 아직 모르는 USB ID 지만 같은 칩이 지원된다면, 그 칩의 기존 ID 를 `newid=` 로 이어 줍니다(예: `newid=0bda:b831/0bda:b851`).
-4. `./vm/build.sh` 로 VM 이미지를 다시 만들고 `./app/build_app.sh --install` 로 앱을 빌드·설치한 뒤, 메뉴의 **VM 이미지 업데이트** 를 누릅니다. `build_app.sh` 는 `dist/vm_assets` 가 이미 있으면 VM 이미지를 다시 만들지 않습니다.
+4. GodseonDongle-VM 에서 `./build.sh` 로 이미지를 다시 만들고, 이 저장소에서 그 이미지로 앱을 빌드 · 설치한 뒤 메뉴의 **VM 이미지 업데이트** 를 누릅니다.
+
+   ```sh
+   VM_ASSETS_DIR=../GodseonDongle-VM/dist/vm_assets ./app/build_app.sh --install
+   ```
 
 커널에 아예 없는 외부 드라이버(제조사가 배포하는 소스 등)는 지금은 지원하지 않습니다.
 
@@ -151,38 +156,40 @@ VM 의 리눅스 커널(Alpine linux-stable)에는 위 표 말고도 USB Wi-Fi �
 
 ## 직접 빌드
 
-필요한 것: Xcode Command Line Tools(Swift 5.10 이상), Docker Desktop(VM 이미지를 Alpine arm64 컨테이너에서 만듭니다).
+필요한 것: Xcode Command Line Tools(Swift 5.10 이상). VM 이미지는 [GodseonDongle-VM](https://github.com/afy0817/GodseonDongle-VM) 의 릴리스를 받아 넣으므로 Docker 는 필요 없습니다. 어느 릴리스를 쓸지는 [`vm-assets.env`](vm-assets.env) 에 버전과 sha256 으로 적혀 있습니다.
 
 ```sh
-./vm/build.sh                  # dist/vm_assets: 커널 + initramfs
-./app/build_app.sh             # dist/ThruRNDIS-Wi-Fi.app (VM 이미지가 없으면 먼저 만듦)
+./app/build_app.sh             # dist/ThruRNDIS-Wi-Fi.app (VM 이미지는 처음 한 번 내려받음)
 ./app/build_app.sh --install   # /Applications 에 설치
 ```
 
-릴리스용 압축 파일:
+VM 이미지를 직접 만들어 넣으려면 GodseonDongle-VM 에서 `./build.sh` 를 돌린 뒤 `VM_ASSETS_DIR=../GodseonDongle-VM/dist/vm_assets ./app/build_app.sh` 로 빌드합니다.
+
+릴리스용 파일:
 
 ```sh
-ditto -c -k --keepParent dist/ThruRNDIS-Wi-Fi.app dist/ThruRNDIS-Wi-Fi.zip
+./app/build_app.sh --release   # dist/ThruRNDIS-Wi-Fi.zip, dist/vm_assets-sources.tar.gz
 ```
+
+앱 zip 에는 VM 이미지(리눅스, BusyBox 등 GPL 바이너리)가 들어 있으므로, GitHub 릴리스에는 `ThruRNDIS-Wi-Fi.zip` 과 함께 `vm_assets-sources.tar.gz`(그 이미지의 대응 소스)를 같이 올립니다.
 
 ### 구조
 
 ```text
 app/              메뉴 막대 앱 (SwiftUI)
 helper/           라우팅 도우미: launchd 데몬과, ThruRNDIS 연결이 기본 경로가 되지 않게 하는 도구
-vm/               VM 이미지 빌드: Alpine linux-stable, Wi-Fi 드라이버·펌웨어, wpa_supplicant, 제어 API
-vm/drivers.conf   VM 에 넣을 USB Wi-Fi 드라이버 목록
-vm/tools/         find-driver.sh: USB ID 로 드라이버 찾기
+vm-assets.env     번들할 GodseonDongle-VM 릴리스 (버전 · 주소 · sha256)
 ```
+
+VM 이미지(커널, initramfs, Wi-Fi 드라이버 · 펌웨어, wpa_supplicant, 제어 API)는 [GodseonDongle-VM](https://github.com/afy0817/GodseonDongle-VM) 에 있습니다. ThruRNDIS 가 이 이미지를 띄우면 VM 은 ThruRNDIS 용 동작(thrurndis 모드: 호스트 링크 192.168.100.x, 제어 API 8080)을 씁니다.
 
 ## 라이선스
 
-- `app/`, `helper/`: MIT
-- `vm/`: GPL-2.0-or-later (ThruRNDIS VM 자산 스크립트를 바탕으로 함)
-
-파일마다 SPDX 헤더가 있고, 라이선스 원문은 [`LICENSES/`](LICENSES) 에 있습니다.
+- `app/`, `helper/`: MIT ([LICENSE](LICENSE)). 파일마다 SPDX 헤더가 있습니다.
+- 앱에 번들하는 VM 이미지: [GodseonDongle-VM](https://github.com/afy0817/GodseonDongle-VM) 에서 만듭니다. 빌더와 VM 스크립트는 GPL-2.0-or-later(ThruRNDIS VM 자산 스크립트를 바탕으로 함)이고, 이미지 안의 리눅스 · BusyBox · Alpine 패키지 · 펌웨어는 각자의 라이선스를 따릅니다. 앱 안 `Contents/Resources/vm_assets/compliance/` 에 구성 요소별 라이선스와 원문(`THIRD_PARTY_NOTICES.md`, `licenses/`)과 대응 소스 위치(`SOURCE.md`)가 있고, 대응 소스 `vm_assets-sources.tar.gz` 는 GodseonDongle-VM 릴리스와 이 앱의 릴리스에 함께 올립니다.
 
 ## 감사
 
 - [ThruRNDIS](https://github.com/Afcoo/ThruRNDIS) (Afcoo): VM 실행, USB 전달, 맥 쪽 네트워크 연결을 모두 ThruRNDIS 가 맡습니다.
+- [ThruRNDIS_VM_Assets](https://github.com/Afcoo/ThruRNDIS_VM_Assets) (Afcoo): VM 이미지의 구조와 기본 스크립트.
 - Linux `rtw89` 드라이버, Alpine Linux, wpa_supplicant.

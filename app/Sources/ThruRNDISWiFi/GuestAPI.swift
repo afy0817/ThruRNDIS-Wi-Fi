@@ -3,7 +3,8 @@
 
 import Foundation
 
-/// Client for the guest's busybox httpd control API (vm/initramfs/api.cgi).
+/// Client for the guest's busybox httpd control API (initramfs/api.cgi in GodseonDongle-VM;
+/// ThruRNDIS boots the image in its thrurndis mode, where the API listens on eth0:8080).
 struct GuestAPI {
     let host: String
     let token: String

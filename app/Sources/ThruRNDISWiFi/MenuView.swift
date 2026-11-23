@@ -83,7 +83,7 @@ struct MenuView: View {
                    detail: "USB 송신이 밀려 VM 안에서 동글을 재설정합니다. 15초쯤 끊겼다가 다시 연결됩니다.")
         } else if let id = model.status?.usb_unsupported, !id.isEmpty {
             notice("USB 장치 \(id) 를 맡을 드라이버가 VM 에 없습니다.",
-                   detail: "지원하지 않는 동글입니다. vm/drivers.conf 에 드라이버를 추가해 다시 빌드할 수 있습니다(README 의 '다른 동글 쓰기').")
+                   detail: "지원하지 않는 동글입니다. GodseonDongle-VM 의 drivers.conf 에 드라이버를 추가해 VM 이미지를 다시 빌드할 수 있습니다(README 의 '다른 동글 쓰기').")
         } else if model.status?.device == false {
             notice("VM 은 실행 중이지만 동글이 연결되지 않았습니다.",
                    detail: "'가상 머신 액세서리' 에서 USB Wi-Fi 동글을 ThruRNDIS 로 넘기세요.")

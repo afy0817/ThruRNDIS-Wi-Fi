@@ -117,7 +117,10 @@ enum ThruRNDISBridge {
         set("VMAssets.kernelOverrideURLPath", nil)
         set("VMAssets.initialRamdiskOverrideURLPath", nil)
         set("VMAssets.managedReleaseDirectoryURLPath", nil)
-        set("VM.kernelCommandLine", "console=hvc0 thrurndis-wifi.token=\(token) thrurndis-wifi.country=\(country)")
+        // thrurndis-wifi.mode=thrurndis: the GodseonDongle-VM image also runs GodseonDongle's own VM
+        // (USB/IP, another host link); this selects ThruRNDIS's layout (its default anyway).
+        set("VM.kernelCommandLine",
+            "console=hvc0 thrurndis-wifi.mode=thrurndis thrurndis-wifi.token=\(token) thrurndis-wifi.country=\(country)")
         CFPreferencesAppSynchronize(bundleID)
         try await launch()
     }

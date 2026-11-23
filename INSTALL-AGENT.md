@@ -66,7 +66,7 @@ command -v brew
 system_profiler SPUSBDataType | grep -B2 -A8 -i 'wireless\|wlan\|802.11\|realtek\|mediatek\|ralink\|atheros'
 ```
 
-`Vendor ID: 0x0bda` · `Product ID: 0xb812` 처럼 나오면 USB ID 는 `0bda:b812` 입니다. README 의 "지원 동글" 표나 [`vm/drivers.conf`](vm/drivers.conf) 의 칩과 견줍니다. 실제 동글로 확인한 것은 `0bda:b831`(RTL8851BU) 과 `0bda:b812`(RTL8822BU) 입니다. 칩을 모르면 일단 진행합니다. 지원하지 않으면 동글을 넘긴 뒤 메뉴에 드라이버가 없다는 안내가 뜹니다.
+`Vendor ID: 0x0bda` · `Product ID: 0xb812` 처럼 나오면 USB ID 는 `0bda:b812` 입니다. README 의 "지원 동글" 표나 [GodseonDongle-VM 의 `drivers.conf`](https://github.com/afy0817/GodseonDongle-VM/blob/main/drivers.conf) 의 칩과 견줍니다. 실제 동글로 확인한 것은 `0bda:b831`(RTL8851BU) 과 `0bda:b812`(RTL8822BU) 입니다. 칩을 모르면 일단 진행합니다. 지원하지 않으면 동글을 넘긴 뒤 메뉴에 드라이버가 없다는 안내가 뜹니다.
 
 ## 2. ThruRNDIS 설치와 첫 실행
 
@@ -118,7 +118,7 @@ open /Applications/ThruRNDIS-Wi-Fi.app
 2. **동글 넘기기** — 사용자가 동글을 꽂고, 메뉴 막대의 **가상 머신 액세서리** 에서 동글을 **ThruRNDIS** 로 넘깁니다. ThruRNDIS 의 USB 연결 확인 창이 뜨면 승인합니다.
    - ThruRNDIS 설정의 **USB 기기** 에서 이 동글의 **자동 연결** 을 켜 두라고 권합니다. 동글 송신이 막혀 앱이 VM 을 다시 시작할 때, 이게 켜져 있어야 동글이 저절로 다시 붙습니다.
    - 메뉴에 검색 목록과 "맥 라우팅" 칸이 나오면 동글이 잡힌 것입니다.
-   - "USB 장치 xxxx:yyyy 를 맡을 드라이버가 VM 에 없습니다." 가 뜨면 지원하지 않는 동글입니다. 사용자에게 알리고 멈춥니다. 드라이버를 더하려면 Docker 로 VM 이미지를 다시 빌드해야 합니다 (README "다른 동글 쓰기").
+   - "USB 장치 xxxx:yyyy 를 맡을 드라이버가 VM 에 없습니다." 가 뜨면 지원하지 않는 동글입니다. 사용자에게 알리고 멈춥니다. 드라이버를 더하려면 GodseonDongle-VM 에서 Docker 로 VM 이미지를 다시 빌드해야 합니다 (README "다른 동글 쓰기").
 3. **라우팅 도우미 설치** — "맥 라우팅" 칸의 **설치 (관리자 암호)**. 사용자가 관리자 암호를 입력합니다.
    - 확인: `ls /Library/LaunchDaemons/io.github.afy0817.thrurndis-wifi.routed.plist /usr/local/libexec/thrurndis-wifi-routed` 가 둘 다 있고, 메뉴에 `도우미 설치됨` 이 보이면 됩니다.
 4. **연결** — **검색** → 네트워크 행을 누르거나 **연결** → 사용자가 비밀번호를 입력합니다. 숨김 네트워크는 **다른 네트워크(숨김)…** 에서 SSID 를 넣습니다.

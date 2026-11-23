@@ -5,18 +5,54 @@
 # Builds dist/ThruRNDIS-Wi-Fi.app (ad-hoc signed; it needs no restricted entitlement
 # because USB passthrough stays inside the officially signed ThruRNDIS).
 #   ./app/build_app.sh [--install]     --install copies it to /Applications
+#   ./app/build_app.sh --release       also dist/ThruRNDIS-Wi-Fi.zip and the VM image's
+#                                      corresponding source, dist/vm_assets-sources.tar.gz:
+#                                      a GitHub release of the app carries both
+# The VM image is a GodseonDongle-VM release, pinned in vm-assets.env: vm_assets.zip is
+# downloaded once into dist/cache and checked against its sha256. To bundle a local build
+# instead (after ./build.sh in a GodseonDongle-VM checkout):
+#   VM_ASSETS_DIR=../GodseonDongle-VM/dist/vm_assets ./app/build_app.sh
 
 set -eu
 
 APP_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH='' cd -- "$APP_DIR/.." && pwd)
 DIST=$ROOT/dist
-ASSETS=$DIST/vm_assets
 BUNDLE=$DIST/ThruRNDIS-Wi-Fi.app
 VERSION=${THRURNDIS_WIFI_VERSION:-0.1.0}
 
-if [ ! -f "$ASSETS/initramfs-thrurndis-wifi" ]; then
-    "$ROOT/vm/build.sh" "$ASSETS"
+# shellcheck source=../vm-assets.env
+. "$ROOT/vm-assets.env"
+sha256() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
+if [ "${1:-}" = --release ] && [ -n "${VM_ASSETS_DIR:-}" ]; then
+    echo "--release bundles the pinned GodseonDongle-VM release; unset VM_ASSETS_DIR" >&2
+    exit 1
+fi
+if [ -n "${VM_ASSETS_DIR:-}" ]; then
+    ASSETS=$(CDPATH='' cd -- "$VM_ASSETS_DIR" && pwd)
+else
+    ASSETS=$DIST/vm_assets
+    ZIP=$DIST/cache/vm_assets-$VM_ASSETS_VERSION.zip
+    if [ ! -f "$ZIP" ] || [ "$(sha256 "$ZIP")" != "$VM_ASSETS_SHA256" ]; then
+        mkdir -p "$DIST/cache"
+        echo "downloading GodseonDongle-VM $VM_ASSETS_VERSION"
+        curl -fL --retry 3 -o "$ZIP.part" "$VM_ASSETS_URL"
+        if [ "$(sha256 "$ZIP.part")" != "$VM_ASSETS_SHA256" ]; then
+            echo "vm_assets.zip of $VM_ASSETS_VERSION does not match VM_ASSETS_SHA256 in vm-assets.env" >&2
+            rm -f "$ZIP.part"
+            exit 1
+        fi
+        mv "$ZIP.part" "$ZIP"
+    fi
+    rm -rf "$ASSETS"
+    ditto -x -k "$ZIP" "$DIST"
+fi
+if [ ! -f "$ASSETS/initramfs-thrurndis-wifi" ] || [ ! -f "$ASSETS/manifest.json" ]; then
+    echo "$ASSETS is not a GodseonDongle-VM image" >&2
+    exit 1
+fi
+if [ ! -f "$ASSETS/compliance/SOURCE.md" ]; then
+    echo "warning: $ASSETS has no license notices (a ./build.sh --quick image); do not distribute this app" >&2
 fi
 
 swift build --package-path "$APP_DIR" -c release
@@ -64,4 +100,24 @@ if [ "${1:-}" = "--install" ]; then
     rm -rf /Applications/ThruRNDIS-Wi-Fi.app
     cp -R "$BUNDLE" /Applications/ThruRNDIS-Wi-Fi.app
     echo "installed /Applications/ThruRNDIS-Wi-Fi.app"
+fi
+
+if [ "${1:-}" = "--release" ]; then
+    # The app zip ships the GPL binaries of the VM image, so its release also carries their
+    # source: the same vm_assets-sources.tar.gz as the GodseonDongle-VM release (see
+    # vm_assets/compliance/SOURCE.md inside the app).
+    SOURCES=$DIST/vm_assets-sources.tar.gz
+    if [ ! -f "$SOURCES" ] || [ "$(sha256 "$SOURCES")" != "$VM_SOURCES_SHA256" ]; then
+        echo "downloading the corresponding source of GodseonDongle-VM $VM_ASSETS_VERSION"
+        curl -fL --retry 3 -o "$SOURCES.part" "$VM_SOURCES_URL"
+        if [ "$(sha256 "$SOURCES.part")" != "$VM_SOURCES_SHA256" ]; then
+            echo "vm_assets-sources.tar.gz does not match VM_SOURCES_SHA256 in vm-assets.env" >&2
+            rm -f "$SOURCES.part"
+            exit 1
+        fi
+        mv "$SOURCES.part" "$SOURCES"
+    fi
+    rm -f "$DIST/ThruRNDIS-Wi-Fi.zip"
+    ditto -c -k --keepParent "$BUNDLE" "$DIST/ThruRNDIS-Wi-Fi.zip"
+    echo "release files: $DIST/ThruRNDIS-Wi-Fi.zip $SOURCES"
 fi
